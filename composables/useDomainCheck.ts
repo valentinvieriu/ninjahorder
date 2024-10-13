@@ -120,7 +120,7 @@ export const useDomainCheck = () => {
       const data = (await response.json()) as DoHResponse
 
       const isRegistered =
-        (data.Status === 0 && data.Answer?.length > 0) ||
+        (data.Status === 0 && (data.Answer?.length ?? 0) > 0) ||
         (data.Status === 3 && data.Authority?.some(auth => auth.type !== 6))
 
       const available = !isRegistered
