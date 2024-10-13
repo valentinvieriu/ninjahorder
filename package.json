@@ -12,9 +12,10 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "nuxt": "^3.13.0",
+    "nuxt": "^3.13.2",
     "vue": "latest",
-    "vue-router": "latest"
+    "vue-router": "latest",
+    "@nuxtjs/tailwindcss": "^6.12.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241011.0",
