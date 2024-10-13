@@ -119,16 +119,9 @@ export const useDomainCheck = () => {
       })
       const data = (await response.json()) as DoHResponse
 
-      /**
-       * Process the DoH response based on the DNS response code and sections.
-       *
-       * A domain is considered registered (not available) if:
-       * 1. The status is 0 (NOERROR) and there are Answer records, or
-       * 2. The status is 3 (NXDOMAIN) but there are Authority records that are not of type 6 (SOA)
-       */
       const isRegistered =
-        (data.Status === 0 && data.Answer && data.Answer.length > 0) ||
-        (data.Status === 3 && data.Authority && data.Authority.some(auth => auth.type !== 6))
+        (data.Status === 0 && data.Answer?.length > 0) ||
+        (data.Status === 3 && data.Authority?.some(auth => auth.type !== 6))
 
       const available = !isRegistered
 

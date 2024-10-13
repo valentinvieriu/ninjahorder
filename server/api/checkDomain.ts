@@ -23,23 +23,19 @@ export default defineEventHandler(async (event) => {
     })
 
     const isRegistered =
-      (data.Status === 0 && data.Answer) ||
-      (data.Status === 3 && data.Authority && data.Authority[0].type != 6)
+      (data.Status === 0 && data.Answer?.length > 0) ||
+      (data.Status === 3 && data.Authority?.some(auth => auth.type !== 6))
 
     const available = !isRegistered
 
-    let link = '#'
-    if (available) {
-      const tld = '.' + domain.split('.').pop()
-      const { namecheapTLDs } = await import(`~/utils/tlds`)
-      if (namecheapTLDs.includes(tld)) {
-        link = `https://www.namecheap.com/domains/registration/results/?domain=${domain}`
-      } else {
-        link = `https://domainr.com/${domain}`
-      }
-    } else {
-      link = `http://${domain}`
-    }
+    const tld = '.' + domain.split('.').pop()
+    const { namecheapTLDs } = await import(`~/utils/tlds`)
+    
+    const link = available
+      ? namecheapTLDs.includes(tld)
+        ? `https://www.namecheap.com/domains/registration/results/?domain=${domain}`
+        : `https://domainr.com/${domain}`
+      : `http://${domain}`
 
     return { domain, available, link }
   } catch (error) {
