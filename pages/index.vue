@@ -1,91 +1,41 @@
 <template>
-  <div class="container mx-auto p-4 min-h-screen flex flex-col items-center">
-    <h1 class="text-2xl font-bold text-center mb-6 text-gray-800 dark:text-gray-200">
-      NinjaHorder - Your Private Domain Scout
-    </h1>
-    <DomainForm @submit="handleSubmit" :initialData="formData" />
-    <div v-if="isChecking" class="w-full max-w-md mt-4">
-      <div class="bg-gray-200 rounded-full h-2.5 dark:bg-gray-700">
+  <div class="container mx-auto px-4 py-8">
+    <h1 class="text-3xl font-bold mb-8 text-center">Domain Availability Checker</h1>
+    <DomainForm :initialData="initialFormData" @submit="handleSubmit" />
+    <div v-if="isChecking" class="mt-8">
+      <p class="text-center">Checking domains... {{ Math.round(progress) }}%</p>
+      <div class="w-full bg-gray-200 rounded-full h-2.5 mt-2">
         <div class="bg-blue-600 h-2.5 rounded-full" :style="{ width: `${progress}%` }"></div>
       </div>
-      <p class="text-center mt-2 text-sm text-gray-600 dark:text-gray-400">
-        Checking domains: {{ Math.round(progress) }}%
-      </p>
     </div>
-    <DomainResult :results="results" />
+    <div v-else-if="results.available.length > 0 || results.notAvailable.length > 0" class="mt-8 space-y-4">
+      <h2 class="text-2xl font-semibold mb-4">Results:</h2>
+      <div v-if="results.available.length > 0">
+        <h3 class="text-xl font-semibold mb-2">Available Domains:</h3>
+        <DomainResult v-for="result in results.available" :key="result.domain" :result="result" />
+      </div>
+      <div v-if="results.notAvailable.length > 0">
+        <h3 class="text-xl font-semibold mb-2">Unavailable Domains:</h3>
+        <DomainResult v-for="result in results.notAvailable" :key="result.domain" :result="result" />
+      </div>
+    </div>
   </div>
 </template>
 
-<script setup>
-import { ref, onMounted, watch } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
-import DomainForm from '~/components/DomainForm.vue'
-import DomainResult from '~/components/DomainResult.vue'
+<script setup lang="ts">
+import { ref } from 'vue'
 import { useDomainCheck } from '~/composables/useDomainCheck'
-import { popularTLDs, countryTLDs, customTLDs } from '~/utils/tlds'
 
 const { checkDomains, results, progress, isChecking } = useDomainCheck()
 
-const router = useRouter()
-const route = useRoute()
-
-const formData = ref({
+const initialFormData = ref({
   domain: '',
   popularTLDs: false,
   countryTLDs: false,
   customTLDs: false,
 })
 
-const updateFormDataFromQuery = () => {
-  const { domain, tldTypes } = route.query
-  if (typeof domain === 'string' && typeof tldTypes === 'string') {
-    const tldTypesList = tldTypes.split(',')
-    formData.value = {
-      domain: domain.toLowerCase(),
-      popularTLDs: tldTypesList.includes('popular'),
-      countryTLDs: tldTypesList.includes('country'),
-      customTLDs: tldTypesList.includes('custom'),
-    }
-    return true
-  }
-  return false
+const handleSubmit = async (data: { domain: string, tlds: string[] }) => {
+  await checkDomains(data.domain, data.tlds)
 }
-
-const handleSubmit = async (data) => {
-  const { domain, popularTLDs: popular, countryTLDs: country, customTLDs: custom } = data
-  const selectedTLDs = []
-
-  if (!domain) return
-
-  if (popular) selectedTLDs.push(...popularTLDs)
-  if (country) selectedTLDs.push(...countryTLDs)
-  if (custom) selectedTLDs.push(...customTLDs)
-
-  await checkDomains(domain.toLowerCase(), selectedTLDs)
-
-  // Update URL with query parameters for bookmarking and history
-  router.push({
-    query: {
-      domain: domain.toLowerCase(),
-      tldTypes: [
-        popular && 'popular',
-        country && 'country',
-        custom && 'custom'
-      ].filter(Boolean).join(',')
-    }
-  })
-}
-
-onMounted(() => {
-  if (updateFormDataFromQuery()) {
-    handleSubmit(formData.value)
-  }
-})
-
-// Watch for route changes to update form data and trigger new checks
-watch(() => route.query, () => {
-  if (updateFormDataFromQuery()) {
-    handleSubmit(formData.value)
-  }
-}, { immediate: true, deep: true })
 </script>

@@ -70,17 +70,20 @@
   </form>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref, watch } from 'vue'
+import { popularTLDs, countryTLDs, customTLDs } from '~/utils/tlds'
+
+const props = defineProps<{
+  initialData: {
+    domain: string
+    popularTLDs: boolean
+    countryTLDs: boolean
+    customTLDs: boolean
+  }
+}>()
 
 const emit = defineEmits(['submit'])
-
-const props = defineProps({
-  initialData: {
-    type: Object,
-    required: true,
-  },
-})
 
 const domain = ref(props.initialData.domain)
 const popularTLDsChecked = ref(props.initialData.popularTLDs)
@@ -95,12 +98,12 @@ watch(() => props.initialData, (newValue) => {
 }, { deep: true })
 
 const handleSubmit = () => {
-  emit('submit', {
-    domain: domain.value,
-    popularTLDs: popularTLDsChecked.value,
-    countryTLDs: countryTLDsChecked.value,
-    customTLDs: customTLDsChecked.value,
-  })
+  const selectedTLDs = []
+  if (popularTLDsChecked.value) selectedTLDs.push(...popularTLDs)
+  if (countryTLDsChecked.value) selectedTLDs.push(...countryTLDs)
+  if (customTLDsChecked.value) selectedTLDs.push(...customTLDs)
+
+  emit('submit', { domain: domain.value, tlds: selectedTLDs })
 }
 
 const handleReset = () => {
