@@ -8,7 +8,7 @@
         <div class="bg-blue-600 h-2.5 rounded-full" :style="{ width: `${progress}%` }"></div>
       </div>
     </div>
-    <div v-else-if="results.available.length > 0 || results.notAvailable.length > 0" class="mt-8 space-y-4">
+    <div v-else-if="hasResults" class="mt-8 space-y-4">
       <h2 class="text-2xl font-semibold mb-4">Results:</h2>
       <div v-if="results.available.length > 0">
         <h3 class="text-xl font-semibold mb-2">Available Domains:</h3>
@@ -18,15 +18,20 @@
         <h3 class="text-xl font-semibold mb-2">Unavailable Domains:</h3>
         <DomainResult v-for="result in results.notAvailable" :key="result.domain" :result="result" />
       </div>
+      <div v-if="results.other?.length > 0">
+        <h3 class="text-xl font-semibold mb-2">Indeterminate/Error Domains:</h3>
+        <DomainResult v-for="result in results.other" :key="result.domain" :result="result" />
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useDomainCheck } from '~/composables/useDomainCheck'
 
-const { checkDomains, results, progress, isChecking } = useDomainCheck()
+const { checkDomains, groupedResults, progress, isChecking } = useDomainCheck()
+const results = groupedResults
 
 const initialFormData = ref({
   domain: '',
@@ -34,6 +39,12 @@ const initialFormData = ref({
   countryTLDs: false,
   customTLDs: false,
 })
+
+const hasResults = computed(() => 
+  results.value.available.length > 0 || 
+  results.value.notAvailable.length > 0 || 
+  results.value.other.length > 0
+)
 
 const handleSubmit = async (data: { domain: string, tlds: string[] }) => {
   await checkDomains(data.domain, data.tlds)

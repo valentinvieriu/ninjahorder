@@ -2,7 +2,13 @@
   // https://nuxt.com/docs/guide/concepts/typescript
 "extends": "./.nuxt/tsconfig.json",
 "compilerOptions": {
+    // Enable stricter type-checking options. Highly recommended for catching errors early.
+    // Nuxt's base config might already enable this, but being explicit is clearer.
+    "strict": true,
     "types": [
+        // Include Cloudflare Workers types globally for TypeScript support
+        // when interacting with Cloudflare bindings (KV, R2, D1, Environment Variables, etc.) in server routes or plugins.
+        // The specific date ensures type stability based on that version of the spec.
         "@cloudflare/workers-types/2023-07-01"
     ]
 }

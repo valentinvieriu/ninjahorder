@@ -8,19 +8,19 @@
     "generate": "nuxt generate",
     "preview": "npm run build && wrangler dev",
     "postinstall": "nuxt prepare",
-    "deploy": "npm run build && wrangler deploy",
-    "cf-typegen": "wrangler types"
+    "deploy": "npm run build && wrangler deploy", 
+    "cf-typegen": "wrangler types" 
   },
   "dependencies": {
-    "nuxt": "^3.13.2",
-    "vue": "latest",
-    "vue-router": "latest",
-    "@nuxtjs/tailwindcss": "^6.12.1"
+    "nuxt": "^3.16.1",
+    "vue": "^3.5.13", 
+    "vue-router": "^4.5.0", 
+    "@nuxtjs/tailwindcss": "^6.13.2"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20241011.0",
-    "nitro-cloudflare-dev": "^0.2.0",
-    "nitropack": "^2.9.7",
-    "wrangler": "^3.80.4"
+    "@cloudflare/workers-types": "^4.20250327.0",
+    "nitro-cloudflare-dev": "^0.2.2",
+    "nitropack": "^2.11.8",
+    "wrangler": "^4.6.0"
   }
 }
