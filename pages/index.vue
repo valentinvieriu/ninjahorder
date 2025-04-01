@@ -14,6 +14,10 @@
         <h3 class="text-xl font-semibold mb-2">Available Domains:</h3>
         <DomainResult v-for="result in results.available" :key="result.domain" :result="result" />
       </div>
+      <div v-if="results.premium.length > 0">
+        <h3 class="text-xl font-semibold mb-2">Premium Domains:</h3>
+        <DomainResult v-for="result in results.premium" :key="result.domain" :result="result" />
+      </div>
       <div v-if="results.notAvailable.length > 0">
         <h3 class="text-xl font-semibold mb-2">Unavailable Domains:</h3>
         <DomainResult v-for="result in results.notAvailable" :key="result.domain" :result="result" />
@@ -42,6 +46,7 @@ const initialFormData = ref({
 
 const hasResults = computed(() => 
   results.value.available.length > 0 || 
+  results.value.premium.length > 0 ||
   results.value.notAvailable.length > 0 || 
   results.value.other.length > 0
 )

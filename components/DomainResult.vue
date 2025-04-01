@@ -56,6 +56,8 @@ const statusColorClass = computed(() => {
       return 'bg-green-500'
     case DomainAvailabilityStatus.REGISTERED: 
       return 'bg-red-500'
+    case DomainAvailabilityStatus.PREMIUM: 
+      return 'bg-purple-500'
     case DomainAvailabilityStatus.INDETERMINATE: 
       return 'bg-yellow-500'
     case DomainAvailabilityStatus.ERROR:
@@ -70,6 +72,8 @@ const statusBadgeClass = computed(() => {
       return 'bg-green-100 text-green-800'
     case DomainAvailabilityStatus.REGISTERED: 
       return 'bg-red-100 text-red-800'
+    case DomainAvailabilityStatus.PREMIUM: 
+      return 'bg-purple-100 text-purple-800'
     case DomainAvailabilityStatus.INDETERMINATE: 
       return 'bg-yellow-100 text-yellow-800'
     case DomainAvailabilityStatus.ERROR:
@@ -84,6 +88,8 @@ const statusText = computed(() => {
       return 'Available'
     case DomainAvailabilityStatus.REGISTERED: 
       return 'Registered'
+    case DomainAvailabilityStatus.PREMIUM: 
+      return 'Premium Domain'
     case DomainAvailabilityStatus.INDETERMINATE: 
       return 'Indeterminate'
     case DomainAvailabilityStatus.ERROR:
@@ -99,6 +105,8 @@ const buttonText = computed(() => {
       return 'Register'
     case DomainAvailabilityStatus.REGISTERED: 
       return 'Visit'
+    case DomainAvailabilityStatus.PREMIUM: 
+      return 'Purchase'
     case DomainAvailabilityStatus.INDETERMINATE: 
       return 'Check'
     case DomainAvailabilityStatus.ERROR:
