@@ -1,5 +1,7 @@
 import { ref, reactive, computed } from 'vue'
 import { namecheapTLDs } from '~/utils/tlds'
+import { DohResolver, DnsStatusCode, DnsRecordType } from '~/utils/DohResolver'
+import type { DnsResponse } from '~/utils/DohResolver'
 
 // --- Constants ---
 const DNS_STATUS_NOERROR = 0
@@ -205,6 +207,15 @@ const PARKING_PATTERNS = {
         /inquire.*purchase/i,                  // Purchase inquiry
         /domainbroker/i,                       // Domain broker reference
         /reserve[d]?[-_]?domain/i              // Reserved domain
+    ],
+    // Active domain usage signals
+    ACTIVE_USAGE: [
+        /google-site-verification=/i,          // Google site verification
+        /ms=ms\d+/i,                           // Microsoft verification
+        /facebook-domain-verification=/i,      // Facebook domain verification
+        /apple-domain-verification=/i,         // Apple domain verification
+        /docusign=.+/i,                        // DocuSign verification
+        /stripe-verification=/i                // Stripe verification
     ]
 };
 
@@ -280,37 +291,9 @@ interface DomainResult {
   isParkedByTxt: boolean
 }
 
-// Define the DoH JSON response interface
-interface DoHJsonResponse {
-  Status: number
-  TC: boolean
-  RD: boolean
-  RA: boolean
-  AD: boolean
-  CD: boolean
-  Question: {
-    name: string
-    type: number
-  }[]
-  Answer?: {
-    name: string
-    type: number
-    TTL: number
-    data: string
-  }[]
-  Authority?: {
-    name: string
-    type: number
-    TTL: number
-    data: string
-  }[]
-  Additional?: {
-    name: string
-    type: number
-    TTL: number
-    data: string
-  }[]
-  Comment?: string
+// Update DoHJsonResponse to extend the DnsResponse interface
+interface DoHJsonResponse extends DnsResponse {
+  // Keep any additional properties specific to this implementation
 }
 
 interface CacheEntry {
@@ -491,90 +474,83 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
     return { category, message, suggestsDomainExists }
   }
 
-  const fetchWithTimeout = async (url: string, options: RequestInit, timeout: number): Promise<Response> => {
-    const controller = new AbortController()
-    const id = setTimeout(() => controller.abort(), timeout)
-
-    try {
-      const response = await fetch(url, {
-        ...options,
-        signal: controller.signal
-      })
-      clearTimeout(id)
-      if (!response.ok) {
-        // Throw an error that includes the status code for better handling later
-        throw new Error(`DoH request failed with status ${response.status} for ${url}`)
-      }
-      return response
-    } catch (error) {
-      clearTimeout(id)
-       // If it's an AbortError due to our timeout, rethrow it clearly
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        throw new Error(`Request timed out after ${timeout}ms for ${url}`)
-      }
-      // Rethrow other errors (like network errors or the !response.ok error)
-      throw error
-    }
-  }
-
   const fetchDnsJson = async (providerUrl: string, domain: string, recordType: number): Promise<DoHJsonResponse> => {
-    const config = getProviderConfigFromUrl(providerUrl)
+    const config = getProviderConfigFromUrl(providerUrl);
     if (!config) {
       // Should not happen if providerUrl comes from DOH_PROVIDER_URLS
-      throw new Error(`Configuration error: Unknown DNS provider URL: ${providerUrl}`)
+      throw new Error(`Configuration error: Unknown DNS provider URL: ${providerUrl}`);
     }
-
-    const url = config.formatUrl(config.baseUrl, domain, recordType)
     
-    let attempts = 0
-    let lastError: Error | null = null
+    let attempts = 0;
+    let lastError: Error | null = null;
 
     while (attempts <= MAX_RETRIES) {
       try {
-        const response = await fetchWithTimeout(url, {
-          method: 'GET',
-          headers: config.headers
-        }, TIMEOUT_MS)
-
-        const data = await response.json() as DoHJsonResponse
+        // Create a DohResolver instance
+        const resolver = new DohResolver(config.baseUrl);
+        
+        // Convert numeric record type to string if needed for readability in logs
+        let recordTypeStr: string;
+        switch (recordType) {
+          case DNS_RECORD_TYPE_NS:
+            recordTypeStr = 'NS';
+            break;
+          case DNS_RECORD_TYPE_SOA:
+            recordTypeStr = 'SOA';
+            break;
+          case DNS_RECORD_TYPE_TXT:
+            recordTypeStr = 'TXT';
+            break;
+          default:
+            recordTypeStr = recordType.toString();
+        }
+        
+        // Use the DohResolver to query the domain
+        const data = await resolver.query(
+          domain, 
+          recordType, 
+          'GET',  // Use GET method which is more compatible with DoH providers
+          config.headers, 
+          TIMEOUT_MS
+        ) as DoHJsonResponse;
 
         // Add context if the DNS status code itself suggests existence
         if (ERROR_CODES_SUGGESTING_DOMAIN_EXISTS.includes(data.Status)) {
           data.Comment = `DNS server returned ${DNS_STATUS_MESSAGES[data.Status] || 'error code ' + data.Status}. This often happens with registered domains.`
         }
-
-        return data
+        
+        return data;
       } catch (rawError) {
-        const error = rawError instanceof Error ? rawError : new Error(String(rawError))
-        lastError = error
-        attempts++
+        const error = rawError instanceof Error ? rawError : new Error(String(rawError));
+        lastError = error;
+        attempts++;
         
         // Determine if this is a retryable error (timeout or specific network issues)
         const isTimeout = error instanceof DOMException && error.name === 'AbortError' || 
-                          error.message.toLowerCase().includes('timeout')
+                          error.message.toLowerCase().includes('timeout');
         
         // Check if it's a server error that might be transient
         const isTransientServerError = error.message.includes('status') && 
-                                       /status (50[234])/.test(error.message)
+                                       /status (50[234])/.test(error.message);
         
         if ((isTimeout || isTransientServerError) && attempts <= MAX_RETRIES) {
           // This is a retryable error and we haven't exceeded MAX_RETRIES
-          console.warn(`[Domain Check] Retrying query for ${domain} (${recordType}) with ${config.name} (Attempt ${attempts}/${MAX_RETRIES}) after error: ${error.message}`)
+          console.warn(`[Domain Check] Retrying query for ${domain} (${recordType}) with ${config.name} (Attempt ${attempts}/${MAX_RETRIES}) after error: ${error.message}`);
           // Add a small delay before retry
-          await new Promise(resolve => setTimeout(resolve, 200))
-          continue
+          await new Promise(resolve => setTimeout(resolve, 200));
+          continue;
         }
         
         // Either not retryable or exceeded max retries
-        break
+        break;
       }
     }
 
     // If we get here, all attempts failed
     if (lastError) {
-      throw lastError
+      throw lastError;
     } else {
-      throw new Error('Unknown error during DNS fetch')
+      throw new Error('Unknown error during DNS fetch');
     }
   }
 
@@ -1033,9 +1009,10 @@ const interpretCombinedResults = (
     let networkOrTimeoutErrorCount = 0
     let dnssecValidated = false
     let parkedNsCount = 0 // Count providers reporting parked NS
-    const txtAnalysisResults = new Map<string, ReturnType<typeof analyzeTxtRecordsForParking>>() // Defined here
+    const txtAnalysisResults = new Map<string, ReturnType<typeof analyzeTxtRecordsForParking>>() // Updated type
     let primaryErrorCategory: ErrorCategory | undefined = undefined
     let primaryErrorMessage: string | undefined = undefined
+    let hasActiveUsageIndicators = false // Track active usage indicators
 
     const processedProviders = new Set<string>()
     const nsResponses = new Map<string, string[]>() // Store NS records per provider
@@ -1099,6 +1076,12 @@ const interpretCombinedResults = (
                      txtAnalysisResults.set(result.provider, analysis); // Store full analysis
                      if (analysis.matchedPatterns.length > 0) {
                           reasons.push(` -> Found patterns: [${analysis.matchedPatterns.join(', ')}] (Confidence: ${analysis.confidence})`);
+                     }
+                     
+                     // Check for active usage indicators
+                     if (analysis.hasActiveUsageIndicators) {
+                         hasActiveUsageIndicators = true;
+                         reasons.push(` -> Found active domain usage indicators (verifications)`);
                      }
                 }
 
@@ -1201,8 +1184,23 @@ const interpretCombinedResults = (
       parkedTxtConsensusCount >= consensusThreshold ||
       (isWildcard && (parkedNsCount > 0 || parkedTxtConsensusCount > 0)); // Wildcard + any parking signal is strong
 
-    // Priority 1: Conclusive Registered (NOERROR + Records)
-    if (noErrorWithRecordsCount > 0) {
+    // Priority 1: Domain with active usage verification should be marked registered (regardless of other signals)
+    if (hasActiveUsageIndicators) {
+        finalStatus = DomainAvailabilityStatus.REGISTERED;
+        reasons.push("High Confidence: Found active usage indicators (verification TXT records), domain is in use.");
+        
+        // Add additional context if we also have other signals
+        if (noErrorWithRecordsCount > 0) {
+            reasons.push("-> Also confirmed by NS/SOA records.");
+        }
+        
+        // Still note parking signals if present
+        if (hasStrongParkingSignal) {
+            reasons.push(`-> Domain also shows parking signals (NS: ${parkedNsCount}, TXT Park: ${parkedTxtConsensusCount}, Wildcard: ${isWildcard}).`);
+        }
+    }
+    // Priority 2: Conclusive Registered (NOERROR + Records)
+    else if (noErrorWithRecordsCount > 0) {
         finalStatus = DomainAvailabilityStatus.REGISTERED;
         reasons.push("High Confidence: Found authoritative NS/SOA records, indicating the domain is registered.");
         // Add parking/premium *hints* based on NS/TXT, but don't change status to PREMIUM here
@@ -1211,10 +1209,9 @@ const interpretCombinedResults = (
         } else if (hasPremiumTxtSignalConsensus) {
              reasons.push(`-> Premium TXT patterns detected by consensus, potentially indicating a premium domain for sale. Matched TXT: [${Array.from(uniquePremiumTxtPatterns).join(', ')}]`);
         }
-        // Add other parking signal details as before...
-
-    // Priority 2: Conclusive Available (NXDOMAIN Consensus, No Wildcard/Conflicts) - Keep this similar
-    } else if (nxDomainCount > 0 && noErrorWithRecordsCount === 0 && servFailCount === 0 /* REMOVED premiumIndicatorsAuthority check */) {
+    }
+    // Priority 3: Conclusive Available (NXDOMAIN Consensus, No Wildcard/Conflicts)
+    else if (nxDomainCount > 0 && noErrorWithRecordsCount === 0 && servFailCount === 0) {
          if (!isWildcard && nxDomainCount >= distinctProviderResponses) {
             finalStatus = DomainAvailabilityStatus.AVAILABLE;
             reasons.push("High Confidence: All responding providers reported NXDOMAIN (Not Found) without conflicting signals.");
@@ -1223,7 +1220,7 @@ const interpretCombinedResults = (
                  reasons.push(`-> Warning: Domain appears available (NXDOMAIN), but conflicting Premium TXT patterns were detected. Status uncertain. Matched TXT: [${Array.from(uniquePremiumTxtPatterns).join(', ')}]`);
                  finalStatus = DomainAvailabilityStatus.INDETERMINATE; // Downgrade confidence
              }
-        } else if (!isWildcard && nxDomainCount > 0 && (nxDomainCount + networkOrTimeoutErrorCount + otherDnsErrorCount) >= distinctProviderResponses /* Adjusted condition slightly */ ) {
+        } else if (!isWildcard && nxDomainCount > 0 && (nxDomainCount + networkOrTimeoutErrorCount + otherDnsErrorCount) >= distinctProviderResponses) {
              finalStatus = DomainAvailabilityStatus.AVAILABLE;
              reasons.push("Moderate Confidence: At least one provider reported NXDOMAIN with no conflicting registration signals.");
               if (hasPremiumTxtSignalConsensus) {
@@ -1244,36 +1241,42 @@ const interpretCombinedResults = (
              finalStatus = DomainAvailabilityStatus.INDETERMINATE;
              reasons.push("Low Confidence: Mixed results including NXDOMAIN, status uncertain.");
         }
-
-    // Priority 3: Premium based ONLY on TXT Consensus (if not already Registered/Available)
-    } else if (hasPremiumTxtSignalConsensus && noErrorWithRecordsCount === 0 && nxDomainCount === 0 ) {
+    }
+    // Priority 4: Premium based ONLY on TXT Consensus (if not already Registered/Available)
+    else if (hasPremiumTxtSignalConsensus && noErrorWithRecordsCount === 0 && nxDomainCount === 0 ) {
          finalStatus = DomainAvailabilityStatus.PREMIUM;
          reasons.push(`Moderate Confidence: Premium status inferred primarily from consensus on specific TXT records indicating domain is for sale/premium. Matched TXT: [${Array.from(uniquePremiumTxtPatterns).join(', ')}]`);
           if (hasStrongParkingSignal && !reasons[reasons.length-1].includes("Parking signals")) { // Add parking info if relevant and not redundant
              reasons.push(`-> Parking signals also detected (NS: ${parkedNsCount}, TXT Park: ${parkedTxtConsensusCount}, Wildcard: ${isWildcard}), supporting premium/reserved classification.`);
          }
-
-    // Priority 4: Likely Registered (SERVFAIL, errors suggesting existence, OR strong parking without clear NOERROR/NXDOMAIN/PremiumTXT)
-    } else if (servFailCount > 0 || (totalErrorsSuggestingDomainExists >= consensusThreshold && distinctProviderResponses > 0) || (hasStrongParkingSignal && noErrorWithRecordsCount === 0 && nxDomainCount === 0 /* && !hasPremiumTxtSignalConsensus - implicitly covered by Priority 3 */)) {
-       // Keep this logic largely the same, ensuring it mentions parking signals appropriately...
-        finalStatus = DomainAvailabilityStatus.REGISTERED
-        // ... (rest of the reasons as before) ...
-
-    // Priority 5: Indeterminate
-     } else if (noErrorWithoutRecordsCount > 0) {
-        finalStatus = DomainAvailabilityStatus.INDETERMINATE
-        reasons.push("Low Confidence: Received NOERROR status but without confirming NS/SOA records. Status uncertain.")
-         if (isWildcard) reasons.push("-> Wildcard DNS detected, adding to uncertainty.")
-    // Priority 6: Error
-    } else if ((networkOrTimeoutErrorCount + otherDnsErrorCount) === totalResponses && totalResponses > 0) {
-        finalStatus = DomainAvailabilityStatus.ERROR
-        reasons.push("Error: Failed to get conclusive DNS status due to network issues or server errors.")
+    }
+    // Priority 5: Likely Registered (SERVFAIL, errors suggesting existence, OR strong parking without clear NOERROR/NXDOMAIN/PremiumTXT)
+    else if (servFailCount > 0 || (totalErrorsSuggestingDomainExists >= consensusThreshold && distinctProviderResponses > 0) || (hasStrongParkingSignal && noErrorWithRecordsCount === 0 && nxDomainCount === 0)) {
+        finalStatus = DomainAvailabilityStatus.REGISTERED;
+        if (servFailCount > 0) {
+            reasons.push("Moderate Confidence: DNS server failures (SERVFAIL) often occur with registered but misconfigured domains.");
+        } else if (totalErrorsSuggestingDomainExists >= consensusThreshold) {
+            reasons.push("Moderate Confidence: Multiple errors suggesting domain likely exists but has DNS issues.");
+        } else {
+            reasons.push("Moderate Confidence: Strong parking signals without clear NOERROR/NXDOMAIN suggest domain is registered and parked.");
+        }
+    }
+    // Priority 6: Indeterminate
+     else if (noErrorWithoutRecordsCount > 0) {
+        finalStatus = DomainAvailabilityStatus.INDETERMINATE;
+        reasons.push("Low Confidence: Received NOERROR status but without confirming NS/SOA records. Status uncertain.");
+         if (isWildcard) reasons.push("-> Wildcard DNS detected, adding to uncertainty.");
+    }
+    // Priority 7: Error
+    else if ((networkOrTimeoutErrorCount + otherDnsErrorCount) === totalResponses && totalResponses > 0) {
+        finalStatus = DomainAvailabilityStatus.ERROR;
+        reasons.push("Error: Failed to get conclusive DNS status due to network issues or server errors.");
     } else {
         // Default fallback
-        finalStatus = DomainAvailabilityStatus.INDETERMINATE
-         reasons.push("Indeterminate: Could not determine a confident status based on mixed or inconclusive results.")
+        finalStatus = DomainAvailabilityStatus.INDETERMINATE;
+         reasons.push("Indeterminate: Could not determine a confident status based on mixed or inconclusive results.");
         if ((networkOrTimeoutErrorCount + otherDnsErrorCount + servFailCount) === totalResponses && totalResponses > 0) {
-             finalStatus = DomainAvailabilityStatus.ERROR
+             finalStatus = DomainAvailabilityStatus.ERROR;
         }
     }
 
@@ -1368,15 +1371,17 @@ const interpretCombinedResults = (
     isParked: boolean,
     isPremium: boolean,
     confidence: number,
-    matchedPatterns: string[]
+    matchedPatterns: string[],
+    hasActiveUsageIndicators: boolean
   } => {
     if (!data.Answer || data.Answer.length === 0) {
-        return { isParked: false, isPremium: false, confidence: 0, matchedPatterns: [] };
+        return { isParked: false, isPremium: false, confidence: 0, matchedPatterns: [], hasActiveUsageIndicators: false };
     }
 
     const patternsFound = new Set<string>();
     let hasSpf = false, hasDkim = false, hasDmarc = false,
-        hasWildcard = false, hasRegistrarMarker = false, hasPremiumMarker = false;
+        hasWildcard = false, hasRegistrarMarker = false, hasPremiumMarker = false,
+        hasVerificationTxt = false;
 
     data.Answer.forEach(record => {
         if (record.type === DNS_RECORD_TYPE_TXT && typeof record.data === 'string') {
@@ -1438,6 +1443,25 @@ const interpretCombinedResults = (
                                         patternDescription = "Generic Premium Domain Marker";
                                     }
                                     break;
+                                case 'ACTIVE_USAGE':
+                                    hasVerificationTxt = true;
+                                    // Provide specific verification type descriptions
+                                    if (pattern.toString().includes('google-site-verification')) {
+                                        patternDescription = "Google Site Verification";
+                                    } else if (pattern.toString().includes('ms=ms')) {
+                                        patternDescription = "Microsoft Verification";
+                                    } else if (pattern.toString().includes('facebook')) {
+                                        patternDescription = "Facebook Domain Verification";
+                                    } else if (pattern.toString().includes('apple')) {
+                                        patternDescription = "Apple Domain Verification";
+                                    } else if (pattern.toString().includes('docusign')) {
+                                        patternDescription = "DocuSign Verification";
+                                    } else if (pattern.toString().includes('stripe')) {
+                                        patternDescription = "Stripe Verification";
+                                    } else {
+                                        patternDescription = "Service Verification TXT";
+                                    }
+                                    break;
                             }
                             
                             if (patternDescription) {
@@ -1464,6 +1488,7 @@ const interpretCombinedResults = (
             testPattern(PARKING_PATTERNS.DMARC, 'DMARC');
             testPattern(PARKING_PATTERNS.REGISTRAR, 'REGISTRAR');
             testPattern(PARKING_PATTERNS.PREMIUM, 'PREMIUM');
+            testPattern(PARKING_PATTERNS.ACTIVE_USAGE, 'ACTIVE_USAGE');
         }
     });
 
@@ -1489,7 +1514,8 @@ const interpretCombinedResults = (
         isParked,
         isPremium,
         confidence,
-        matchedPatterns: Array.from(patternsFound)
+        matchedPatterns: Array.from(patternsFound),
+        hasActiveUsageIndicators: hasVerificationTxt
     };
   };
 
