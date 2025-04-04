@@ -2,10 +2,26 @@
   <div class="container mx-auto px-4 py-8">
     <h1 class="text-3xl font-bold mb-8 text-center">Domain Availability Checker</h1>
     <DomainForm :initialData="initialFormData" @submit="handleSubmit" />
-    <div v-if="isChecking" class="mt-8">
-      <p class="text-center">Checking domains... {{ Math.round(progress) }}%</p>
-      <div class="w-full bg-gray-200 rounded-full h-2.5 mt-2">
-        <div class="bg-blue-600 h-2.5 rounded-full" :style="{ width: `${progress}%` }"></div>
+    <div v-if="isChecking" class="mt-8 space-y-4">
+      <div class="flex justify-between items-center">
+        <p class="text-sm font-semibold text-gray-600">{{ stageMessages[progress.stage] }}</p>
+        <p class="text-sm font-medium">{{ progress.domainsProcessed }} / {{ progress.totalDomains }} domains</p>
+      </div>
+      
+      <div class="w-full bg-gray-200 rounded-full h-2.5">
+        <div class="bg-blue-600 h-2.5 rounded-full transition-all duration-300" :style="{ width: `${progress.percentage}%` }"></div>
+      </div>
+      
+      <div class="text-center text-sm">
+        <p v-if="progress.currentDomain" class="font-medium">
+          {{ progress.detailedMessage || `Checking ${progress.currentDomain}...` }}
+        </p>
+        <p v-else-if="progress.detailedMessage" class="font-medium">
+          {{ progress.detailedMessage }}
+        </p>
+        <p v-else class="text-xs text-gray-500">
+          {{ Math.round(progress.percentage) }}% complete
+        </p>
       </div>
     </div>
     <div v-else-if="hasResults" class="mt-8 space-y-4">
@@ -32,7 +48,7 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { useDomainCheck } from '~/composables/useDomainCheck'
+import { useDomainCheck, stageMessages } from '~/composables/useDomainCheck'
 
 const { checkDomains, groupedResults, progress, isChecking } = useDomainCheck()
 const results = groupedResults
