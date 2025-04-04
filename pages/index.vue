@@ -55,7 +55,7 @@ const results = groupedResults
 
 const initialFormData = ref({
   domain: '',
-  popularTLDs: false,
+  popularTLDs: true,
   countryTLDs: false,
   customTLDs: false,
 })
