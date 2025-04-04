@@ -217,7 +217,7 @@ export async function sendDohMsg(
 
     // Parse the response based on content type
     const contentType = response.headers.get('content-type');
-    if (contentType?.includes('application/dns-json')) {
+    if (contentType?.includes('application/dns-json') || contentType?.includes('application/json')) {
       return await response.json() as DnsResponse;
     } else if (contentType?.includes('application/dns-message')) {
       // In a full implementation, we'd use dns-packet to decode the wire format response
