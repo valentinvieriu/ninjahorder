@@ -337,7 +337,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     baseUrl: 'https://dns.google/resolve',
     formatUrl: (baseUrl, domain, type) =>
       `${baseUrl}?name=${encodeURIComponent(domain)}&type=${type}`,
-    headers: { } // No specific headers needed for Google DNS API
+    headers: { 'Accept': 'application/dns-json' }
   }
 };
 
