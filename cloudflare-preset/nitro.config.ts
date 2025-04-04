@@ -20,8 +20,11 @@ export default <NitroPreset>{
 		output: {
 			entryFileNames: "index.js",
 			format: "esm",
-			exports: "named",
-			inlineDynamicImports: false,
+			exports: "auto",
+			inlineDynamicImports: true,
 		},
+	},
+	workers: {
+		format: "modules",
 	},
 };
