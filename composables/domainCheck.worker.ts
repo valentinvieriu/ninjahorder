@@ -3,56 +3,68 @@
  * preventing UI freezes when checking multiple domains at once.
  */
 
-// Define check steps for more detailed progress reporting
-enum CheckStage {
-  PREPARING = 'preparing',
-  WILDCARD_CHECK = 'wildcard_check',
-  PRIMARY_QUERY = 'primary_query',
-  FALLBACK_QUERY = 'fallback_query',
-  ANALYZING = 'analyzing',
-  FINALIZING = 'finalizing',
-  COMPLETE = 'complete'
-}
+// Import the core logic, types, and necessary constants
+import {
+  checkDomainAvailability,
+  handleError, // Import error handler
+  generateLink, // Import link generator
+  DomainAvailabilityStatus, // Import status enum
+  ErrorCategory, // Import error category enum
+  CheckStage, // Import stage enum
+} from './domainCheckerLogic'; // Adjust path if necessary
 
-// Define the interfaces needed for worker communication
+// Import types - must use type import
+import type {
+  DomainResult, // Import result type
+  ProgressState, // Import progress type
+} from './domainCheckerLogic';
+
+// Import constants from config
+import { DOH_PROVIDER_URLS } from '../config/appConfig';
+
+// Define the interfaces needed for worker communication based on imported types
 interface DomainCheckRequest {
   domainName: string;
   tlds: string[];
+  // Optionally receive provider URLs if they can't be imported directly in worker context
+  // dohProviderUrls?: string[];
 }
 
-interface ProgressState {
-  percentage: number;
-  currentDomain?: string;
-  stage: CheckStage;
-  domainsProcessed: number;
-  totalDomains: number;
-  detailedMessage?: string;
-}
-
+// Use imported ProgressState for progress messages
 interface DomainCheckProgress {
   type: 'progress';
-  progressState: Partial<ProgressState>;
-  // Keeping these for backwards compatibility
-  progress?: number;
-  domain?: string;
+  progressState: Partial<ProgressState>; // Use partial as we update parts
 }
 
+// Use imported DomainResult for result messages
 interface DomainCheckResult {
   type: 'result';
-  results: any[]; // Will contain the array of DomainResult objects
+  results: DomainResult[]; // Use the imported type
 }
 
 interface DomainCheckError {
   type: 'error';
   message: string;
-  domain?: string;
+  domain?: string; // Specific domain error
 }
 
-// Message handler
+// --- Worker State ---
+let currentWildcardProviderIndex = 0; // Keep track of provider for wildcard checks
+
+// Helper to get next provider URL for wildcard checks
+const getNextWildcardProviderUrl = () => {
+    // Use the imported DOH_PROVIDER_URLS
+    const providerUrl = DOH_PROVIDER_URLS[currentWildcardProviderIndex];
+    currentWildcardProviderIndex = (currentWildcardProviderIndex + 1) % DOH_PROVIDER_URLS.length;
+    return providerUrl;
+}
+
+// --- Message Handler ---
 self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
   try {
     const { domainName, tlds } = event.data;
-    
+    currentWildcardProviderIndex = 0; // Reset index for each new batch
+
     if (!domainName || !tlds || !Array.isArray(tlds) || tlds.length === 0) {
       self.postMessage({
         type: 'error',
@@ -60,12 +72,11 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
       } as DomainCheckError);
       return;
     }
-    
-    // We'll run the checks sequentially in the worker
-    const results: any[] = [];
+
+    const results: DomainResult[] = []; // Use DomainResult type
     const totalDomains = tlds.length;
-    
-    // Initial progress state
+
+    // Initial progress update
     self.postMessage({
       type: 'progress',
       progressState: {
@@ -73,152 +84,138 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
         stage: CheckStage.PREPARING,
         domainsProcessed: 0,
         totalDomains: totalDomains,
-        detailedMessage: 'Preparing domain checks...'
+        detailedMessage: 'Worker preparing domain checks...'
       }
     } as DomainCheckProgress);
-    
-    // Domain percentage allocation
+
     const domainPercentage = 100 / totalDomains;
-    
+
     for (let i = 0; i < tlds.length; i++) {
       const tld = tlds[i];
       const fullDomain = `${domainName}${tld}`;
-      
-      // Update for starting this domain
+
+      // Update progress for starting this domain
+      const currentProgressBase = (i / totalDomains) * 95; // Base percentage for this domain
       self.postMessage({
         type: 'progress',
         progressState: {
-          percentage: (i / totalDomains) * 95, // Reserve 5% for finalization
+          percentage: currentProgressBase,
           currentDomain: fullDomain,
-          stage: CheckStage.WILDCARD_CHECK,
+          stage: CheckStage.PREPARING, // Start with preparing stage for this domain
           domainsProcessed: i,
           totalDomains: totalDomains,
-          detailedMessage: `Starting check for ${fullDomain}`
+          detailedMessage: `Worker starting check for ${fullDomain}`
         }
       } as DomainCheckProgress);
-      
+
       try {
-        // WILDCARD CHECK PHASE - Update progress for current phase
+        // --- No simulation needed, call the actual function ---
+        // Get the provider URL for this specific wildcard check
+        const wildcardProviderUrl = getNextWildcardProviderUrl();
+
+        // Call the imported check function
+        // Note: The checkDomainAvailability function itself handles internal stages
+        // like wildcard check, primary query, fallback, analysis.
+        // We only signal the start and completion from the worker loop.
+        const result = await checkDomainAvailability(fullDomain, wildcardProviderUrl);
+
+        // Add the successful result
+        results.push(result);
+
+        // Update progress for completing this domain successfully
         self.postMessage({
           type: 'progress',
           progressState: {
-            percentage: (i / totalDomains) * 95 + (domainPercentage * 0.2),
-            currentDomain: fullDomain,
-            stage: CheckStage.WILDCARD_CHECK,
-            detailedMessage: `Checking wildcard DNS for ${fullDomain}`
-          }
-        } as DomainCheckProgress);
-        
-        // Simulate progress through phases - this should be replaced with actual checking logic
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // PRIMARY QUERY PHASE
-        self.postMessage({
-          type: 'progress',
-          progressState: {
-            percentage: (i / totalDomains) * 95 + (domainPercentage * 0.4),
-            currentDomain: fullDomain,
-            stage: CheckStage.PRIMARY_QUERY,
-            detailedMessage: `Querying DNS providers for ${fullDomain}`
-          }
-        } as DomainCheckProgress);
-        
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // FALLBACK PHASE - May be skipped in real implementation
-        self.postMessage({
-          type: 'progress',
-          progressState: {
-            percentage: (i / totalDomains) * 95 + (domainPercentage * 0.6),
-            currentDomain: fullDomain,
-            stage: CheckStage.FALLBACK_QUERY,
-            detailedMessage: `Performing additional DNS checks for ${fullDomain}`
-          }
-        } as DomainCheckProgress);
-        
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // ANALYSIS PHASE
-        self.postMessage({
-          type: 'progress',
-          progressState: {
-            percentage: (i / totalDomains) * 95 + (domainPercentage * 0.8),
-            currentDomain: fullDomain,
-            stage: CheckStage.ANALYZING,
-            detailedMessage: `Analyzing DNS responses for ${fullDomain}`
-          }
-        } as DomainCheckProgress);
-        
-        // Note: The worker will import its own checkDomainAvailability function
-        // from a separate module that's compatible with web workers
-        // For now, simulate the check with a placeholder
-        
-        // In the actual implementation, this would be:
-        // const result = await checkDomainAvailability(fullDomain);
-        
-        // For now, just send a placeholder message to indicate we need to implement this
-        self.postMessage({
-          type: 'error',
-          message: 'Worker implementation incomplete - checkDomainAvailability needs to be imported and called here',
-          domain: fullDomain
-        } as DomainCheckError);
-        
-        // Update progress for completing this domain
-        self.postMessage({
-          type: 'progress',
-          progressState: {
-            percentage: (i + 1) / totalDomains * 95,
+            percentage: ((i + 1) / totalDomains) * 95,
             domainsProcessed: i + 1,
             currentDomain: fullDomain,
-            stage: CheckStage.FINALIZING,
-            detailedMessage: `Completed check for ${fullDomain}`
+            stage: CheckStage.FINALIZING, // Mark as finalizing after completion
+            detailedMessage: `Worker completed check for ${fullDomain}`
           }
         } as DomainCheckProgress);
-        
+
       } catch (error) {
-        // Handle individual domain errors but continue processing
+        // Handle individual domain errors using the imported handler
         console.error(`Worker: Error checking ${fullDomain}:`, error);
-        
-        // Update progress despite error
+        const { category, message, suggestsDomainExists } = handleError(
+            `Worker check for ${fullDomain}`,
+            error as Error,
+            fullDomain
+        );
+
+        // Determine status based on error type
+        const status = suggestsDomainExists ? DomainAvailabilityStatus.REGISTERED : DomainAvailabilityStatus.ERROR;
+
+        // Create an error result object
+        const errorResult: DomainResult = {
+            domain: fullDomain,
+            status: status,
+            error: status === DomainAvailabilityStatus.ERROR,
+            errorCategory: category,
+            errorMessage: message,
+            link: generateLink(fullDomain, status), // Use imported generator
+            confidenceReasons: [
+                `Worker Error: ${message}`,
+                suggestsDomainExists ? 'Error type suggests domain might be registered.' : 'Could not determine status.'
+            ],
+            dnssecValidated: undefined,
+            wildcardDetected: undefined, // Could be refined based on specific error context
+            isParkedByNs: false,
+            isParkedByTxt: false
+        };
+
+        // Add the error result to the list
+        results.push(errorResult);
+
+        // Post specific error message for this domain
+         self.postMessage({
+           type: 'error',
+           message: `Error checking ${fullDomain}: ${message}`,
+           domain: fullDomain // Include domain in error message
+         } as DomainCheckError);
+
+        // Update progress even after an error for this domain
         self.postMessage({
           type: 'progress',
           progressState: {
-            percentage: (i + 1) / totalDomains * 95,
-            domainsProcessed: i + 1,
+            percentage: ((i + 1) / totalDomains) * 95, // Still increment percentage
+            domainsProcessed: i + 1, // Increment processed count
             currentDomain: fullDomain,
-            stage: CheckStage.FINALIZING,
-            detailedMessage: `Error checking ${fullDomain}`
+            stage: CheckStage.FINALIZING, // Mark as finalizing
+            detailedMessage: `Worker encountered error checking ${fullDomain}`
           }
         } as DomainCheckProgress);
       }
     }
-    
+
     // Final progress update before sending results
     self.postMessage({
       type: 'progress',
       progressState: {
-        percentage: 95,
-        stage: CheckStage.FINALIZING,
+        percentage: 100, // Now set to 100
+        stage: CheckStage.COMPLETE,
         domainsProcessed: totalDomains,
         totalDomains: totalDomains,
-        detailedMessage: 'Finalizing all domain checks...'
+        detailedMessage: 'Worker finalizing all domain checks...'
       }
     } as DomainCheckProgress);
-    
-    // Send the final results
+
+    // Send the final results array
     self.postMessage({
       type: 'result',
-      results: results
+      results: results // Send the array of DomainResult objects
     } as DomainCheckResult);
-    
+
   } catch (error) {
-    // Handle any unexpected errors in the worker
+    // Handle unexpected global errors in the worker
+    console.error("Worker: Global error:", error);
     self.postMessage({
       type: 'error',
-      message: `Worker error: ${error instanceof Error ? error.message : String(error)}`
+      message: `Worker encountered unexpected error: ${error instanceof Error ? error.message : String(error)}`
     } as DomainCheckError);
   }
 };
 
-// Export an empty object to satisfy TypeScript module requirement
-export {}; 
+// Export empty object for TypeScript module compatibility if needed,
+// depending on tsconfig settings for workers. Often not strictly required.
+// export {}; 
