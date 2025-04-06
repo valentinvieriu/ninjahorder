@@ -50,7 +50,7 @@ interface GroupedResults {
   other: DomainResult[]
 }
 
-export const useDomainCheck = (options: { useWorkers?: boolean; concurrency?: number } = {}) => {
+export const useDomainCheck = (options: { concurrency?: number } = {}) => {
   const results = reactive<DomainResult[]>([])
   const progress = ref<ProgressState>({
     percentage: 0,
@@ -60,13 +60,13 @@ export const useDomainCheck = (options: { useWorkers?: boolean; concurrency?: nu
   })
   const isChecking = ref(false)
   const cache = ref<Record<string, CacheEntry>>({})
-  let currentProviderIndex = 0
-  let worker: Worker | null = null
-  let abortController: AbortController | null = null
+  let currentProviderIndex = 0 // Kept for potential future use or reference in other parts
+  let worker: Worker | null = null // Re-added worker declaration
+  let abortController: AbortController | null = null // Re-added abortController declaration
   let currentCacheKey: string | null = null
 
-  // Always default to using workers and set default concurrency
-  const { useWorkers = true, concurrency = 5 } = options
+  // Always default concurrency, removed useWorkers
+  const { concurrency = 5 } = options
 
   const groupedResults = computed<GroupedResults>(() => ({
     available: results.filter(result => result.status === DomainAvailabilityStatus.AVAILABLE),
@@ -74,20 +74,6 @@ export const useDomainCheck = (options: { useWorkers?: boolean; concurrency?: nu
     premium: results.filter(result => result.status === DomainAvailabilityStatus.PREMIUM),
     other: results.filter(result => result.status === DomainAvailabilityStatus.INDETERMINATE || result.status === DomainAvailabilityStatus.ERROR)
   }))
-
-  // Helper to create a DohProvider object from a URL
-  const createProviderFromUrl = (url: string): DohProvider => {
-    return {
-      name: `Provider-${currentProviderIndex}`,
-      baseUrl: url
-    }
-  }
-
-  const getNextProvider = (): DohProvider => {
-    const providerUrl = DOH_PROVIDER_URLS[currentProviderIndex]
-    currentProviderIndex = (currentProviderIndex + 1) % DOH_PROVIDER_URLS.length
-    return createProviderFromUrl(providerUrl)
-  }
 
   const cleanupWorker = () => {
     if (worker) {
@@ -165,320 +151,175 @@ export const useDomainCheck = (options: { useWorkers?: boolean; concurrency?: nu
         console.info('[Domain Check] Operation cancelled by user')
       })
 
-      // Only attempt to use workers if they're supported in this environment
-      if (useWorkers && typeof Worker !== 'undefined') {
-        cleanupWorker()
-        worker = new Worker(new URL('./domainCheck.worker.ts', import.meta.url), { type: 'module' })
+      // --- Start of Worker Logic (Now the only path) ---
+      cleanupWorker()
+      // Ensure Worker constructor exists (though we assume it does)
+      if (typeof Worker === 'undefined') {
+         console.error('[Domain Check] Web Workers are not supported in this environment. Cannot proceed.');
+         isChecking.value = false;
+         progress.value = {
+            ...progress.value,
+            stage: CheckStage.ERROR,
+            percentage: 0,
+            detailedMessage: 'Web Workers are required but not supported.'
+         };
+         // Optionally throw an error or return an empty/error state
+         // For now, just log and set state.
+         return groupedResults.value; // Return current (likely empty) results
+      }
 
-        return new Promise<GroupedResults>((resolve, reject) => {
-          if (!worker) {
-            isChecking.value = false
-            reject(new Error('Worker creation failed'))
-            return
+      worker = new Worker(new URL('./domainCheck.worker.ts', import.meta.url), { type: 'module' })
+
+      return new Promise<GroupedResults>((resolve, reject) => {
+        if (!worker) {
+          isChecking.value = false
+          reject(new Error('Worker creation failed'))
+          return
+        }
+
+        // Handle abort events during the promise execution
+        signal.addEventListener('abort', () => {
+          // Clean up and reject if aborted before worker interaction completes fully
+          if (isChecking.value) { // Only reject if still in 'checking' state
+             cleanupWorker();
+             abortController = null;
+             currentCacheKey = null; // Clear cache key on abort
+             isChecking.value = false; // Ensure state is updated
+             progress.value = { // Update progress on abort
+                ...progress.value,
+                stage: CheckStage.CANCELLED,
+                percentage: 0,
+                detailedMessage: 'Domain check cancelled by user'
+             };
+             // Reject the promise to signal cancellation upstream
+             reject(new Error('Domain check cancelled by user'));
           }
+        });
 
-          // Handle abort events during the promise execution
-          signal.addEventListener('abort', () => {
-            reject(new Error('Domain check cancelled by user'))
-          })
+        worker.onmessage = (event) => {
+          // If already aborted, ignore any further messages
+          if (signal.aborted) return
 
-          worker.onmessage = (event) => {
-            // If already aborted, ignore any further messages
-            if (signal.aborted) return
+          const data = event.data as {
+            type: 'progress' | 'result' | 'error' | 'single_result';
+            progress?: number;
+            progressState?: Partial<ProgressState>;
+            results?: DomainResult[];
+            result?: DomainResult; // Single result
+            message?: string;
+            domain?: string;
+          };
 
-            const data = event.data as {
-              type: 'progress' | 'result' | 'error' | 'single_result';
-              progress?: number;
-              progressState?: Partial<ProgressState>;
-              results?: DomainResult[];
-              result?: DomainResult; // Single result
-              message?: string;
-              domain?: string;
-            };
-
-            switch (data.type) {
-              case 'progress':
-                if (data.progressState) {
-                  progress.value = {
-                    ...progress.value,
-                    ...data.progressState,
-                  }
+          switch (data.type) {
+            case 'progress':
+              if (data.progressState) {
+                progress.value = {
+                  ...progress.value,
+                  ...data.progressState,
                 }
-                break;
-              case 'single_result':
-                if (data.result) {
-                  // Add the single result to our results array
-                  const existingIndex = results.findIndex(r => r.domain === data.result!.domain);
-                  if (existingIndex > -1) {
-                    results[existingIndex] = data.result;
-                  } else {
-                    results.push(data.result);
-                  }
-                  
-                  // Only update the cache if the check hasn't been cancelled
-                  if (!signal.aborted && currentCacheKey) {
-                    cache.value[currentCacheKey] = {
-                      results: JSON.parse(JSON.stringify(results)),
-                      timestamp: Date.now()
-                    };
-                  }
-                }
-                break;
-              case 'result':
-                if (Array.isArray(data.results)) {
-                  // This is for backward compatibility - the full array will replace our incremental results
-                  results.splice(0, results.length, ...data.results);
-                  
-                  // Only update the cache if the check hasn't been cancelled
-                  if (!signal.aborted && currentCacheKey) {
-                    cache.value[currentCacheKey] = {
-                      results: JSON.parse(JSON.stringify(data.results)),
-                      timestamp: Date.now()
-                    };
-                  }
+              }
+              break;
+            case 'single_result':
+              if (data.result) {
+                // Add the single result to our results array
+                const existingIndex = results.findIndex(r => r.domain === data.result!.domain);
+                if (existingIndex > -1) {
+                  results[existingIndex] = data.result;
+                } else {
+                  results.push(data.result);
                 }
                 
-                progress.value = {
-                  percentage: 100,
-                  stage: CheckStage.COMPLETE,
-                  domainsProcessed: sortedTLDs.length,
-                  totalDomains: sortedTLDs.length,
-                  detailedMessage: 'All domain checks complete'
+                // Only update the cache if the check hasn't been cancelled
+                if (!signal.aborted && currentCacheKey) {
+                  cache.value[currentCacheKey] = {
+                    results: JSON.parse(JSON.stringify(results)),
+                    timestamp: Date.now()
+                  };
+                }
+              }
+              break;
+            case 'result':
+              if (Array.isArray(data.results)) {
+                // This is for backward compatibility - the full array will replace our incremental results
+                results.splice(0, results.length, ...data.results);
+                
+                // Only update the cache if the check hasn't been cancelled
+                if (!signal.aborted && currentCacheKey) {
+                  cache.value[currentCacheKey] = {
+                    results: JSON.parse(JSON.stringify(data.results)),
+                    timestamp: Date.now()
+                  };
+                }
+              }
+              
+              progress.value = {
+                percentage: 100,
+                stage: CheckStage.COMPLETE,
+                domainsProcessed: sortedTLDs.length,
+                totalDomains: sortedTLDs.length,
+                detailedMessage: 'All domain checks complete'
+              };
+              
+              isChecking.value = false;
+              
+              cleanupWorker();
+              abortController = null;
+              currentCacheKey = null;
+              
+              resolve(groupedResults.value);
+              break;
+            case 'error':
+              console.error(`[Domain Check Worker] ${data.message || 'Unknown error'}`);
+              
+              if (data.domain) {
+                console.warn(`[Domain Check Worker] Error checking ${data.domain}, continuing...`);
+                progress.value.detailedMessage = `Error checking ${data.domain}`;
+                
+                const errorResult: DomainResult = {
+                  domain: data.domain,
+                  status: DomainAvailabilityStatus.ERROR,
+                  error: true,
+                  errorMessage: data.message || 'Worker error',
+                  errorCategory: ErrorCategory.UNKNOWN,
+                  link: generateLink(data.domain, DomainAvailabilityStatus.ERROR),
+                  confidenceReasons: [`Worker reported error: ${data.message || 'Unknown'}`],
+                  isParkedByNs: false,
+                  isParkedByTxt: false
                 };
                 
+                const existingIndex = results.findIndex(r => r.domain === data.domain);
+                if (existingIndex > -1) {
+                  results[existingIndex] = errorResult;
+                } else {
+                  results.push(errorResult);
+                }
+              } else {
                 isChecking.value = false;
-                
                 cleanupWorker();
                 abortController = null;
-                currentCacheKey = null;
-                
-                resolve(groupedResults.value);
-                break;
-              case 'error':
-                console.error(`[Domain Check Worker] ${data.message || 'Unknown error'}`);
-                
-                if (data.domain) {
-                  console.warn(`[Domain Check Worker] Error checking ${data.domain}, continuing...`);
-                  progress.value.detailedMessage = `Error checking ${data.domain}`;
-                  
-                  const errorResult: DomainResult = {
-                    domain: data.domain,
-                    status: DomainAvailabilityStatus.ERROR,
-                    error: true,
-                    errorMessage: data.message || 'Worker error',
-                    errorCategory: ErrorCategory.UNKNOWN,
-                    link: generateLink(data.domain, DomainAvailabilityStatus.ERROR),
-                    confidenceReasons: [`Worker reported error: ${data.message || 'Unknown'}`],
-                    isParkedByNs: false,
-                    isParkedByTxt: false
-                  };
-                  
-                  const existingIndex = results.findIndex(r => r.domain === data.domain);
-                  if (existingIndex > -1) {
-                    results[existingIndex] = errorResult;
-                  } else {
-                    results.push(errorResult);
-                  }
-                } else {
-                  isChecking.value = false;
-                  cleanupWorker();
-                  abortController = null;
-                  reject(new Error(data.message || 'Unknown worker error'));
-                }
-                break;
-            }
-          };
+                reject(new Error(data.message || 'Unknown worker error'));
+              }
+              break;
+          }
+        };
 
-          worker.onerror = (error: ErrorEvent) => {
-            console.error('[Domain Check Worker] Error:', error);
-            isChecking.value = false;
-            cleanupWorker();
-            abortController = null;
-            reject(new Error('Worker error: ' + (error.message || 'Unknown error')));
-          };
+        worker.onerror = (error: ErrorEvent) => {
+          console.error('[Domain Check Worker] Error:', error);
+          isChecking.value = false;
+          cleanupWorker();
+          abortController = null;
+          reject(new Error('Worker error: ' + (error.message || 'Unknown error')));
+        };
 
-          worker.postMessage({
-            domainName,
-            tlds: sortedTLDs,
-            hasSignal: true,
-            concurrencyLimit: concurrency
-          })
+        worker.postMessage({
+          domainName,
+          tlds: sortedTLDs,
+          // Removed hasSignal, worker manages its own AbortController now
+          concurrencyLimit: concurrency
         })
-      } else {
-        // Fallback for environments where workers aren't supported
-        console.warn('[Domain Check] Workers not supported in this environment, falling back to direct API calls')
-        
-        // Use the standard logic directly from our module
-        const totalDomains = sortedTLDs.length
-        const domainCheckPromises: Promise<DomainResult>[] = []
-        
-        for (const tld of sortedTLDs) {
-          const fullDomain = `${domainName}${tld}`
-          const provider = getNextProvider()
-          
-          // Create a closure to update progress for this domain
-          const domainPromise = (async () => {
-            try {
-              // Check if operation was cancelled
-              if (signal.aborted) {
-                throw new Error('Operation cancelled by user')
-              }
-            
-              // Use the existing progress object to track status
-              progress.value = {
-                ...progress.value,
-                currentDomain: fullDomain,
-                stage: CheckStage.PREPARING,
-                detailedMessage: `Starting check for ${fullDomain}`
-              }
-              
-              // Call the core domain checking logic with the abort signal
-              const result = await checkDomainAvailability(fullDomain, [provider], signal)
-              
-              // Update progress
-              progress.value.domainsProcessed++
-              progress.value.percentage = (progress.value.domainsProcessed / totalDomains) * 95
-              progress.value.stage = CheckStage.FINALIZING
-              progress.value.detailedMessage = `Completed check for ${fullDomain}`
-              
-              return result
-            } catch (error) {
-              // If cancelled, rethrow
-              if (signal.aborted) {
-                throw error
-              }
-            
-              // Update progress even when error occurs
-              progress.value.domainsProcessed++
-              progress.value.percentage = (progress.value.domainsProcessed / totalDomains) * 95
-              progress.value.stage = CheckStage.FINALIZING
-              progress.value.detailedMessage = `Error checking ${fullDomain}`
-              
-              // Handle the error
-              const { category, message, suggestsDomainExists } = handleError(
-                `Domain check for ${fullDomain}`,
-                error as Error,
-                fullDomain
-              )
-              
-              const status = suggestsDomainExists 
-                ? DomainAvailabilityStatus.REGISTERED 
-                : DomainAvailabilityStatus.ERROR
-                
-              return {
-                domain: fullDomain,
-                status,
-                error: status === DomainAvailabilityStatus.ERROR,
-                errorCategory: category,
-                errorMessage: message,
-                link: generateLink(fullDomain, status),
-                confidenceReasons: [
-                  `Error during check: ${message}`,
-                  suggestsDomainExists 
-                    ? 'Error type suggests domain might be registered.' 
-                    : 'Could not determine status.'
-                ],
-                dnssecValidated: false,
-                wildcardDetected: false,
-                isParkedByNs: false,
-                isParkedByTxt: false
-              }
-            }
-          })()
-          
-          domainCheckPromises.push(domainPromise)
-        }
-        
-        progress.value.stage = CheckStage.FINALIZING
-        progress.value.detailedMessage = 'Waiting for all domain queries to complete...'
-        
-        try {
-          // Wait for all domain checks to complete, but allow for cancellation
-          const settledResults = await Promise.allSettled(domainCheckPromises)
-          
-          // If operation was cancelled, stop processing
-          if (signal.aborted) {
-            throw new Error('Operation cancelled by user')
-          }
-          
-          // Process results
-          const finalResults: DomainResult[] = settledResults.map((result, index) => {
-            const fullDomain = `${domainName}${sortedTLDs[index]}`
-            if (result.status === 'fulfilled') {
-              return result.value
-            } else {
-              // Handle any unexpected errors
-              console.error(`[Domain Check] Unexpected rejection for ${fullDomain}:`, result.reason)
-              
-              // If it was a cancellation, propagate that
-              if (result.reason instanceof Error && result.reason.name === 'AbortError') {
-                throw result.reason
-              }
-              
-              const { category, message } = handleError(
-                `Unexpected error for ${fullDomain}`,
-                result.reason instanceof Error ? result.reason : new Error(String(result.reason)),
-                fullDomain
-              )
-              
-              return {
-                domain: fullDomain,
-                status: DomainAvailabilityStatus.ERROR,
-                error: true,
-                errorCategory: category,
-                errorMessage: `Unexpected error: ${message}`,
-                link: generateLink(fullDomain, DomainAvailabilityStatus.ERROR),
-                confidenceReasons: ['An unexpected error occurred during the check.'],
-                dnssecValidated: false,
-                wildcardDetected: false,
-                isParkedByNs: false,
-                isParkedByTxt: false
-              }
-            }
-          })
-          
-          // Update final results
-          results.splice(0, results.length, ...finalResults)
-          
-          // Update progress to complete
-          progress.value = {
-            percentage: 100,
-            stage: CheckStage.COMPLETE,
-            domainsProcessed: totalDomains,
-            totalDomains,
-            detailedMessage: 'All domain checks complete'
-          }
-          
-          // Only update the cache if the check hasn't been cancelled
-          if (!signal.aborted && currentCacheKey) {
-            cache.value[currentCacheKey] = {
-              results: JSON.parse(JSON.stringify(finalResults)),
-              timestamp: Date.now()
-            }
-          }
-          
-          isChecking.value = false
-          abortController = null
-          currentCacheKey = null
-          return groupedResults.value
-        } catch (error) {
-          // If operation was cancelled, update progress
-          if (error instanceof Error && (error.name === 'AbortError' || signal.aborted)) {
-            progress.value = {
-              ...progress.value,
-              stage: CheckStage.CANCELLED,
-              detailedMessage: 'Domain check cancelled'
-            }
-            isChecking.value = false
-            abortController = null
-            currentCacheKey = null
-            return groupedResults.value
-          }
-          
-          // Rethrow other errors
-          throw error
-        }
-      }
+      })
+      // --- End of Worker Logic ---
+
     } catch (error) {
       // If operation was cancelled by the user, handle accordingly
       if (error instanceof Error && (error.name === 'AbortError' || signal?.aborted)) {
@@ -519,4 +360,4 @@ export const useDomainCheck = (options: { useWorkers?: boolean; concurrency?: nu
 }
 
 // Remove unnecessary wrapper function since we now default to workers
-export const useDomainCheckWithWorkers = useDomainCheck
+// export const useDomainCheckWithWorkers = useDomainCheck

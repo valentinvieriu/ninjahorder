@@ -124,22 +124,27 @@ export default async function checkDomainAvailability(
     }
     
     // Progress tracking
-    const updateProgressState = (stage: CheckStage, percentage: number) => {
+    const updateProgressState = (stage: CheckStage, percentage: number, detailedMessage?: string) => {
         if (updateProgress) {
             updateProgress({
                 percentage,
                 stage,
-                domainsProcessed: 0,
-                totalDomains: 1,
-                detailedMessage: `Processing ${domain} (${percentage}%)`
+                domainsProcessed: 0, // These will be overridden by caller if part of a batch
+                totalDomains: 1,     // These will be overridden by caller if part of a batch
+                detailedMessage: detailedMessage || `Processing ${domain} (${percentage}%)`
             })
         }
     }
     
     try {
-        updateProgressState(CheckStage.WILDCARD_CHECK, 5)
+        // Check if aborted before we begin
+        if (abortSignal?.aborted) {
+            throw new Error('Operation aborted before starting')
+        }
         
-        // Check for wildcard DNS
+        updateProgressState(CheckStage.WILDCARD_CHECK, 5, `Checking for wildcard DNS on ${domain}...`)
+        
+        // Check for wildcard DNS - Fix: only pass the required two arguments
         const wildcardCheckDomain = `wildcard-check-${Math.random().toString(36).substring(2)}.${domain}`
         const isWildcard = await checkWildcardDNS(wildcardCheckDomain, providers[0])
         
@@ -147,7 +152,12 @@ export default async function checkDomainAvailability(
             confidenceReasons.push(`Wildcard DNS detected with random subdomain check to ${wildcardCheckDomain}.`)
         }
         
-        updateProgressState(CheckStage.PRIMARY_QUERY, 25)
+        // Check if aborted after wildcard check
+        if (abortSignal?.aborted) {
+            throw new Error('Operation aborted after wildcard check')
+        }
+        
+        updateProgressState(CheckStage.PRIMARY_QUERY, 25, `Performing primary DNS queries for ${domain}...`)
         
         // List of query promises to collect
         const queryPromises: Promise<{
@@ -258,7 +268,12 @@ export default async function checkDomainAvailability(
             )
         })
         
-        updateProgressState(CheckStage.ANALYZING, 50)
+        // Check if aborted before analyzing
+        if (abortSignal?.aborted) {
+            throw new Error('Operation aborted during DNS queries')
+        }
+        
+        updateProgressState(CheckStage.ANALYZING, 50, `Analyzing DNS query results for ${domain}...`)
         
         // Wait for all DNS queries to complete
         const results = await Promise.allSettled(queryPromises)
@@ -279,7 +294,12 @@ export default async function checkDomainAvailability(
             }
         })
         
-        updateProgressState(CheckStage.FINALIZING, 75)
+        // Check if aborted before finalizing
+        if (abortSignal?.aborted) {
+            throw new Error('Operation aborted during analysis')
+        }
+        
+        updateProgressState(CheckStage.FINALIZING, 75, `Finalizing result for ${domain}...`)
         
         // Interpret combined results
         const domainResult = interpretCombinedResults(
@@ -294,7 +314,7 @@ export default async function checkDomainAvailability(
         
         // Add double validation for domains flagged as potentially available
         if (domainResult.status === DomainAvailabilityStatus.PENDING_CONFIRMATION) {
-            updateProgressState(CheckStage.CONFIRMATION_QUERY, 85);
+            updateProgressState(CheckStage.CONFIRMATION_QUERY, 85, `Performing confirmation check for ${domain}...`);
             
             try {
                 confidenceReasons.push("Performing additional confirmation check for availability.");
@@ -330,13 +350,18 @@ export default async function checkDomainAvailability(
             }
         }
         
+        // Check if aborted before completing
+        if (abortSignal?.aborted) {
+            throw new Error('Operation aborted during confirmation check')
+        }
+        
         // Log check timing and return result
         const endTime = performance.now()
         const duration = endTime - startTime
         
         confidenceReasons.push(`Query completed in ${duration.toFixed(0)}ms with ${providers.length} providers.`)
         
-        updateProgressState(CheckStage.COMPLETE, 100)
+        updateProgressState(CheckStage.COMPLETE, 100, `Check complete for ${domain}`)
         
         return {
             ...domainResult,
@@ -344,6 +369,22 @@ export default async function checkDomainAvailability(
         }
     } catch (error) {
         console.error('Error checking domain availability:', error)
+        
+        // Check if operation was aborted
+        if (error instanceof Error && (error.name === 'AbortError' || error.message.includes('aborted'))) {
+            if (updateProgress) {
+                updateProgress({
+                    percentage: 0,
+                    stage: CheckStage.CANCELLED,
+                    domainsProcessed: 0,
+                    totalDomains: 1,
+                    detailedMessage: `Check for ${domain} was cancelled`
+                })
+            }
+            
+            // Rethrow abort errors to be handled by caller
+            throw error
+        }
         
         if (updateProgress) {
             updateProgress({
