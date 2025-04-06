@@ -1,20 +1,21 @@
 import { ref, reactive, computed } from 'vue'
 import {
-  checkDomainAvailability,
-  handleError,
-  generateLink,
   DomainAvailabilityStatus,
   ErrorCategory,
   CheckStage,
-} from './domainCheckerLogic'
-import type { ProgressState, DomainResult } from './domainCheckerLogic'
+  type ProgressState,
+  type DomainResult,
+  generateLink,
+  handleError,
+  type DohProvider
+} from './domain'
+import checkDomainAvailability from './domain/checker'
 import { DOH_PROVIDER_URLS } from '../config/appConfig'
 
 // --- Re-export Enums and Types ---
 export { DomainAvailabilityStatus, ErrorCategory, CheckStage };
-export type { ProgressState, DomainResult };
 
-// --- UI Messages (Stay Here) ---
+// --- UI Messages ---
 export const statusMessages = {
   [DomainAvailabilityStatus.AVAILABLE]: 'Available',
   [DomainAvailabilityStatus.REGISTERED]: 'Already Registered',
@@ -29,11 +30,13 @@ export const stageMessages = {
   [CheckStage.PRIMARY_QUERY]: 'Querying primary DNS providers...',
   [CheckStage.FALLBACK_QUERY]: 'Performing additional DNS checks...',
   [CheckStage.ANALYZING]: 'Analyzing DNS responses...',
+  [CheckStage.FINALIZING]: 'Finalizing results...',
   [CheckStage.COMPLETE]: 'Check complete',
-  [CheckStage.CANCELLED]: 'Check cancelled'
+  [CheckStage.CANCELLED]: 'Check cancelled',
+  [CheckStage.ERROR]: 'Check error'
 }
 
-// --- Vue Composable Specifics (Stay Here) ---
+// --- Vue Composable Specifics ---
 interface CacheEntry {
   results: DomainResult[]
   timestamp: number
@@ -71,10 +74,18 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
     other: results.filter(result => result.status === DomainAvailabilityStatus.INDETERMINATE || result.status === DomainAvailabilityStatus.ERROR)
   }))
 
-  const getNextProviderUrl = () => {
+  // Helper to create a DohProvider object from a URL
+  const createProviderFromUrl = (url: string): DohProvider => {
+    return {
+      name: `Provider-${currentProviderIndex}`,
+      baseUrl: url
+    }
+  }
+
+  const getNextProvider = (): DohProvider => {
     const providerUrl = DOH_PROVIDER_URLS[currentProviderIndex]
     currentProviderIndex = (currentProviderIndex + 1) % DOH_PROVIDER_URLS.length
-    return providerUrl
+    return createProviderFromUrl(providerUrl)
   }
 
   const cleanupWorker = () => {
@@ -295,15 +306,13 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
         // Fallback for environments where workers aren't supported
         console.warn('[Domain Check] Workers not supported in this environment, falling back to direct API calls')
         
-        // Use the standard logic directly from domainCheckerLogic
-        // instead of duplicating the implementation
+        // Use the standard logic directly from our module
         const totalDomains = sortedTLDs.length
         const domainCheckPromises: Promise<DomainResult>[] = []
         
         for (const tld of sortedTLDs) {
           const fullDomain = `${domainName}${tld}`
-          const wildcardProviderUrl = DOH_PROVIDER_URLS[currentProviderIndex]
-          currentProviderIndex = (currentProviderIndex + 1) % DOH_PROVIDER_URLS.length
+          const provider = getNextProvider()
           
           // Create a closure to update progress for this domain
           const domainPromise = (async () => {
@@ -322,7 +331,7 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
               }
               
               // Call the core domain checking logic with the abort signal
-              const result = await checkDomainAvailability(fullDomain, wildcardProviderUrl, { signal })
+              const result = await checkDomainAvailability(fullDomain, [provider], signal)
               
               // Update progress
               progress.value.domainsProcessed++
@@ -345,7 +354,7 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
               
               // Handle the error
               const { category, message, suggestsDomainExists } = handleError(
-                'Domain check failed',
+                `Domain check for ${fullDomain}`,
                 error as Error,
                 fullDomain
               )
@@ -367,8 +376,8 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
                     ? 'Error type suggests domain might be registered.' 
                     : 'Could not determine status.'
                 ],
-                dnssecValidated: undefined,
-                wildcardDetected: undefined,
+                dnssecValidated: false,
+                wildcardDetected: false,
                 isParkedByNs: false,
                 isParkedByTxt: false
               }
@@ -405,10 +414,11 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
               }
               
               const { category, message } = handleError(
-                'Unexpected domain check failure',
+                `Unexpected error for ${fullDomain}`,
                 result.reason instanceof Error ? result.reason : new Error(String(result.reason)),
                 fullDomain
               )
+              
               return {
                 domain: fullDomain,
                 status: DomainAvailabilityStatus.ERROR,
@@ -417,8 +427,8 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
                 errorMessage: `Unexpected error: ${message}`,
                 link: generateLink(fullDomain, DomainAvailabilityStatus.ERROR),
                 confidenceReasons: ['An unexpected error occurred during the check.'],
-                dnssecValidated: undefined,
-                wildcardDetected: undefined,
+                dnssecValidated: false,
+                wildcardDetected: false,
                 isParkedByNs: false,
                 isParkedByTxt: false
               }
@@ -506,14 +516,5 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
   }
 }
 
-// Add cancelled state to the CheckStage enum if it doesn't exist
-// This should be added to the domainCheckerLogic.ts file
-declare module './domainCheckerLogic' {
-  export enum CheckStage {
-    CANCELLED = 'CANCELLED'
-  }
-}
-
-// Remove the dedicated worker version since we now default to workers
-// and keep the composable name for backward compatibility
-export const useDomainCheckWithWorkers = () => useDomainCheck();
+// Remove unnecessary wrapper function since we now default to workers
+export const useDomainCheckWithWorkers = useDomainCheck

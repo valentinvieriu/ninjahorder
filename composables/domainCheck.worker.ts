@@ -3,21 +3,18 @@
  * preventing UI freezes when checking multiple domains at once.
  */
 
-// Import the core logic, types, and necessary constants
+// Import from new domain module
+import checkDomainAvailability from './domain/checker';
 import {
-  checkDomainAvailability,
-  handleError, // Import error handler
-  generateLink, // Import link generator
-  DomainAvailabilityStatus, // Import status enum
-  ErrorCategory, // Import error category enum
-  CheckStage, // Import stage enum
-} from './domainCheckerLogic'; // Adjust path if necessary
-
-// Import types - must use type import
-import type {
-  DomainResult, // Import result type
-  ProgressState, // Import progress type
-} from './domainCheckerLogic';
+  generateLink,
+  handleError,
+  DomainAvailabilityStatus,
+  type DomainResult,
+  type ProgressState,
+  CheckStage,
+  ErrorCategory,
+  type DohProvider
+} from './domain';
 
 // Import constants from config
 import { DOH_PROVIDER_URLS } from '../config/appConfig';
@@ -59,7 +56,7 @@ let currentWildcardProviderIndex = 0; // Keep track of provider for wildcard che
 let activeProviders = new Map<string, boolean>(); // Track active and failed providers
 
 // Helper to get next provider URL for wildcard checks
-const getNextWildcardProviderUrl = () => {
+const getNextWildcardProviderUrl = (): DohProvider => {
     // Use the imported DOH_PROVIDER_URLS
     const providerUrl = DOH_PROVIDER_URLS[currentWildcardProviderIndex];
     currentWildcardProviderIndex = (currentWildcardProviderIndex + 1) % DOH_PROVIDER_URLS.length;
@@ -69,7 +66,11 @@ const getNextWildcardProviderUrl = () => {
       activeProviders.set(providerUrl, true); // Mark as active by default
     }
     
-    return providerUrl;
+    // Convert URL to DohProvider object
+    return {
+      name: `Provider-${currentWildcardProviderIndex}`,
+      baseUrl: providerUrl,
+    };
 }
 
 // Track provider status
@@ -200,10 +201,10 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
         } as DomainCheckProgress);
         
         // Perform the domain check
-        const result = await checkDomainAvailability(fullDomain, wildcardProviderUrl);
+        const result = await checkDomainAvailability(fullDomain, [wildcardProviderUrl]);
         
         // Provider is active if we got a result without throwing
-        updateProviderStatus(wildcardProviderUrl, true);
+        updateProviderStatus(wildcardProviderUrl.baseUrl, true);
         
         // Update progress
         updateProgress();
@@ -220,7 +221,7 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
         console.error(`Worker: Error checking ${fullDomain}:`, error);
         const { category, message, suggestsDomainExists } = handleError(
           `Worker check for ${fullDomain}`,
-          error as Error,
+          error instanceof Error ? error : new Error(String(error)),
           fullDomain
         );
 
