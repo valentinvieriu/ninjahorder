@@ -51,9 +51,34 @@ interface DomainCheckError {
   domain?: string; // Specific domain error
 }
 
+// --- Constants for Weighted Progress ---
+const STAGE_WEIGHTS = {
+  [CheckStage.PREPARING]: 0.02,         // 2%
+  [CheckStage.WILDCARD_CHECK]: 0.08,    // 8% (Total 10%)
+  [CheckStage.PRIMARY_QUERY]: 0.60,     // 60% (Total 70%)
+  [CheckStage.CONFIRMATION_QUERY]: 0.15,// 15% (Total 85%) - Assuming confirmation/fallback happens here
+  [CheckStage.ANALYZING]: 0.05,         // 5%  (Total 90%)
+  [CheckStage.FINALIZING]: 0.10,        // 10% (Total 100%)
+  // Other stages like COMPLETE, CANCELLED, ERROR don't contribute to weighted progress directly
+};
+
+// Helper to calculate base progress percentage for a given stage
+const calculateStageBaseProgress = (targetStage: CheckStage): number => {
+  let baseProgress = 0;
+  for (const stage in STAGE_WEIGHTS) {
+    if (stage === targetStage) break;
+    // Check if the stage exists in STAGE_WEIGHTS before adding
+    if (Object.prototype.hasOwnProperty.call(STAGE_WEIGHTS, stage)) {
+       baseProgress += STAGE_WEIGHTS[stage as keyof typeof STAGE_WEIGHTS];
+    }
+  }
+  return baseProgress * 100;
+};
+
 // --- Worker State ---
 let currentWildcardProviderIndex = 0; // Keep track of provider for wildcard checks
 let activeProviders = new Map<string, boolean>(); // Track active and failed providers
+let currentAbortController: AbortController | null = null; // Abort controller for the worker
 
 // Helper to get next provider URL for wildcard checks
 const getNextWildcardProviderUrl = (): DohProvider => {
@@ -115,269 +140,418 @@ class ConcurrencyLimiter {
 }
 
 // --- Message Handler ---
-self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
-  try {
-    const { domainName, tlds, concurrencyLimit = 5 } = event.data; // Default to 5 concurrent checks
-    currentWildcardProviderIndex = 0; // Reset index for each new batch
-    activeProviders = new Map<string, boolean>(); // Reset provider tracking
-    const errorMessages: string[] = []; // Track error messages for display in UI
 
-    if (!domainName || !tlds || !Array.isArray(tlds) || tlds.length === 0) {
-      self.postMessage({
-        type: 'error',
-        message: 'Invalid request: domainName and tlds array are required'
-      } as DomainCheckError);
-      return;
+// --- Refined Progress Update Function (Defined outside onmessage) ---
+// It needs access to the signal, state variables, and postMessage
+const postProgressUpdate = (
+    signal: AbortSignal | null, // Pass signal
+    postMessageFn: (message: any) => void, // Pass postMessage
+    stage: CheckStage,
+    domainsProcessed: number, // Pass state
+    totalDomains: number, // Pass state
+    activeProviders: Map<string, boolean>, // Pass state
+    errorMessages: string[], // Pass state
+    totalRetries: number, // Pass state
+    stageProgressPercent: number = 0,
+    detailedMessageOverride?: string,
+    currentDomainOverride?: string | null
+) => {
+    // If aborted, do nothing
+    if (signal?.aborted) return;
+
+    const baseProgress = calculateStageBaseProgress(stage);
+    const stageWeight = STAGE_WEIGHTS[stage as keyof typeof STAGE_WEIGHTS] || 0;
+    const overallPercentage = Math.min(99, Math.round(baseProgress + (stageProgressPercent * stageWeight))); // Cap at 99
+
+    const providersArray = Array.from(activeProviders.entries()).map(([url, active]) => ({ url, active }));
+
+    const progressState: Partial<ProgressState> = {
+        percentage: overallPercentage,
+        stage: stage,
+        domainsProcessed: domainsProcessed,
+        totalDomains: totalDomains,
+        providers: providersArray,
+        errors: errorMessages.length > 0 ? [...errorMessages] : undefined,
+        retriesAttempted: totalRetries,
+        detailedMessage: detailedMessageOverride,
+        currentDomain: currentDomainOverride === null ? undefined : (currentDomainOverride || undefined)
+    };
+
+    // Set specific message if not overridden
+    if (!detailedMessageOverride) {
+        switch (stage) {
+            case CheckStage.PRIMARY_QUERY:
+            case CheckStage.CONFIRMATION_QUERY:
+                progressState.detailedMessage = `Stage: ${stage}. Processed ${domainsProcessed} of ${totalDomains} domains...`;
+                break;
+             default:
+                progressState.detailedMessage = `Executing stage: ${stage}`;
+        }
     }
 
-    const results: DomainResult[] = []; // Use DomainResult type
-    const totalDomains = tlds.length;
-    let domainsProcessed = 0;
-    let totalRetries = 0;
+    postMessageFn({ type: 'progress', progressState } as DomainCheckProgress);
+};
 
-    // Initial progress update
-    self.postMessage({
-      type: 'progress',
-      progressState: {
-        percentage: 0,
-        stage: CheckStage.PREPARING,
-        domainsProcessed: 0,
-        totalDomains: totalDomains,
-        detailedMessage: 'Worker preparing parallel domain checks...',
-        currentStageStartTime: Date.now()
-      }
-    } as DomainCheckProgress);
+// --- Actual Worker Message Handler ---
+self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort' }>) => {
+  // Handle abort message
+  // Check if type property exists and equals 'abort'
+  if (typeof event.data === 'object' && event.data !== null && 'type' in event.data && event.data.type === 'abort') {
+    console.log('Worker: Received abort signal.');
+    currentAbortController?.abort();
+    return;
+  }
 
-    // Create a concurrency limiter
+  // --- Declare state variables outside try block ---
+  let domainsProcessed = 0;
+  let totalDomains = 0;
+  const errorMessages: string[] = [];
+  const results: DomainResult[] = [];
+  let totalRetries = 0;
+  // -------------------------------------------------
+
+  // Existing logic for DomainCheckRequest
+  const { domainName, tlds, concurrencyLimit = 5 } = event.data as DomainCheckRequest;
+
+  // Create a new AbortController for this specific job
+  currentAbortController = new AbortController();
+  const signal = currentAbortController.signal;
+
+  // --- Define updateProgress wrapper function HERE (outside try block) ---
+  const updateProgress = (stage: CheckStage, stageProgressPercent: number = 0, detailedMessageOverride?: string, currentDomainOverride?: string | null) => {
+      // Check signal before proceeding
+      if (signal?.aborted) return;
+
+      postProgressUpdate(
+          signal, // Pass current signal
+          self.postMessage.bind(self), // Pass postMessage function
+          stage,
+          domainsProcessed, // Access outer scope variable
+          totalDomains,
+          activeProviders,
+          errorMessages,
+          totalRetries,
+          stageProgressPercent,
+          detailedMessageOverride,
+          currentDomainOverride
+      );
+  };
+  // -----------------------------------------------------------
+
+  try {
+    // Reset state for new job (except variables declared outside)
+    currentWildcardProviderIndex = 0;
+    activeProviders = new Map<string, boolean>();
+    // Clear arrays/maps if needed
+    errorMessages.length = 0;
+    results.length = 0;
+    totalRetries = 0;
+
+    // Assign totalDomains here where tlds is known
+    totalDomains = tlds.length;
+
+    if (!domainName || !tlds || !Array.isArray(tlds) || tlds.length === 0) {
+      throw new Error('Invalid request: domainName and tlds array are required');
+    }
+
+    // --- Check Execution Flow ---
+
+    // 1. Preparing Stage
+    updateProgress(CheckStage.PREPARING, 0, 'Preparing domain checks...');
+
+    // Simulate some preparation time if needed, or move directly to next stage
+    // await new Promise(resolve => setTimeout(resolve, 50)); // Optional delay
+
+    // Check if aborted after preparing
+    if (signal.aborted) throw new Error('Aborted during preparation');
+
+    // 2. Wildcard Check (Example - adapt if your logic is different)
+    // Assuming wildcard check happens before individual domain checks
+    // You might need to adjust this based on checkDomainAvailability's internal stages
+    updateProgress(CheckStage.WILDCARD_CHECK, 0, 'Checking for wildcard DNS...');
+    // --- Perform actual wildcard check here ---
+    // For now, simulate completion
+    // await performWildcardCheck(domainName, signal);
+    updateProgress(CheckStage.WILDCARD_CHECK, 100, 'Wildcard check complete.'); // Mark stage as complete
+
+    // Check if aborted after wildcard check
+    if (signal.aborted) throw new Error('Aborted during wildcard check');
+
+    // 3. Primary Query Stage
     const limiter = new ConcurrencyLimiter(concurrencyLimit);
+    updateProgress(CheckStage.PRIMARY_QUERY, 0, `Starting primary checks for ${totalDomains} domains...`, null);
 
-    // Update progress based on completed domains
-    const updateProgress = (increment = 1, additionalState: Partial<ProgressState> = {}) => {
-      domainsProcessed += increment;
-      const percentage = Math.min(95, (domainsProcessed / totalDomains) * 95);
-      
-      // Convert provider status map to array
-      const providersArray = Array.from(activeProviders.entries()).map(([url, active]) => ({
-        url,
-        active
-      }));
-      
-      self.postMessage({
+    const checkPromises = tlds.map((tld, index) => limiter.add(async () => {
+        // Check abort signal before starting each domain
+        if (signal.aborted) return null; // Return null or throw to stop processing this domain
+
+        const fullDomain = `${domainName}${tld}`;
+        let result: DomainResult | null = null;
+        let providerForThisCheck: DohProvider | null = null; // Declare outside try
+
+        try {
+            // Post update before starting the check for *this* domain
+            updateProgress(
+                CheckStage.PRIMARY_QUERY,
+                (domainsProcessed / (totalDomains || 1)) * 100, // Use safe division
+                `Checking ${fullDomain} (${domainsProcessed + 1}/${totalDomains})...`,
+                fullDomain
+            );
+
+            providerForThisCheck = getNextWildcardProviderUrl(); // Assign provider
+            updateProviderStatus(providerForThisCheck.baseUrl, true); // Assume active initially
+
+            // Perform the check using checkDomainAvailability
+            result = await checkDomainAvailability(
+                fullDomain,
+                [providerForThisCheck], // Pass provider(s)
+                signal, // Pass the abort signal
+                (checkerProgress: ProgressState) => {
+                    // ---- INTERNAL PROGRESS CALLBACK from checkDomainAvailability ----
+                    // Use this to update the *detailed message* or *current sub-task*
+                    // Avoid recalculating overall percentage here, let the main loop handle that
+                     if (signal.aborted) return;
+                     // Use updateProgress which calls postProgressUpdate
+                     updateProgress(
+                        CheckStage.PRIMARY_QUERY,
+                         (domainsProcessed / (totalDomains || 1)) * 100, // Keep stage progress based on completed domains
+                         checkerProgress.detailedMessage || `Checking ${fullDomain}...`, // Use detailed message from checker
+                         fullDomain
+                     );
+                     // Update provider status based on checker's feedback if possible
+                     if(checkerProgress.providers) {
+                         checkerProgress.providers.forEach(p => updateProviderStatus(p.url, p.active));
+                     }
+                }
+            );
+
+            // Check succeeded
+             updateProviderStatus(providerForThisCheck.baseUrl, true);
+            if (result.retriesAttempted) {
+                totalRetries += result.retriesAttempted;
+            }
+
+        } catch (error: any) {
+             // Check failed
+             if (providerForThisCheck) {
+                updateProviderStatus(providerForThisCheck.baseUrl, false); // Mark provider as failed for this check
+             }
+
+             if (error.name === 'AbortError' || signal.aborted) {
+                 console.log(`Worker: Check for ${fullDomain} aborted.`);
+                 // Don't treat abort as a domain error, just stop processing it.
+                 return null; // Indicate aborted check for this domain
+             }
+
+            console.error(`Worker: Error checking ${fullDomain}:`, error);
+            const { category, message, suggestsDomainExists } = handleError(
+                `Worker check for ${fullDomain}`,
+                error, // Pass the error object
+                fullDomain // Pass the domain as the third argument
+            );
+            errorMessages.push(`${fullDomain}: ${message}`);
+
+            // Create an error result object
+            const statusOnError = suggestsDomainExists ? DomainAvailabilityStatus.INDETERMINATE : DomainAvailabilityStatus.ERROR;
+            result = {
+                domain: fullDomain,
+                status: statusOnError, // Use determined status
+                error: true,
+                errorCategory: category,
+                errorMessage: message,
+                link: generateLink(fullDomain, statusOnError), // Pass status
+                confidenceReasons: ['Check failed due to error.'],
+                isParkedByNs: false, // Assume not parked on error
+                isParkedByTxt: false // Assume not parked on error
+            };
+        } finally {
+             // Increment processed count *after* the check completes or fails (but not if aborted before starting)
+             // Only increment if the promise wasn't aborted prematurely
+             if (!signal.aborted) { // Check signal again before incrementing
+                 domainsProcessed++;
+             }
+
+            // Update overall progress after this domain is done (or errored)
+             // Check signal *before* posting progress or result
+             if (!signal.aborted) {
+                 // Use updateProgress
+                 updateProgress(
+                     CheckStage.PRIMARY_QUERY,
+                     (domainsProcessed / (totalDomains || 1)) * 100, // Update stage progress
+                     `Checked ${fullDomain}. (${domainsProcessed}/${totalDomains})`,
+                     fullDomain // Keep showing last checked domain briefly
+                 );
+
+                 // Send individual result immediately if not null
+                 if (result) {
+                     self.postMessage({ type: 'single_result', result } as DomainCheckSingleResult);
+                     results.push(result); // Add to the final list
+                 }
+             }
+        }
+        return result; // Return result or null if aborted
+    }));
+
+    // Wait for all primary checks to complete
+    const primaryResults = (await Promise.all(checkPromises)).filter(r => r !== null) as DomainResult[];
+
+    // Check if aborted during primary checks
+    if (signal.aborted) throw new Error('Aborted during primary checks');
+
+    // --- Placeholder for Confirmation/Fallback Stage ---
+    // Example: If you need to re-check available domains
+    const availableDomainsToCheck = results // Use 'results' accumulated so far
+        .filter(r => r?.status === DomainAvailabilityStatus.AVAILABLE)
+        .map(r => r.domain);
+
+    if (availableDomainsToCheck.length > 0) {
+        // Use updateProgress
+        updateProgress(CheckStage.CONFIRMATION_QUERY, 0, `Starting confirmation checks for ${availableDomainsToCheck.length} potentially available domains...`, null);
+        let confirmedDomainsProcessed = 0;
+        const totalConfirmationDomains = availableDomainsToCheck.length;
+
+        // Similar loop structure as primary checks, using limiter
+        const confirmationPromises = availableDomainsToCheck.map((domainToConfirm) => limiter.add(async () => {
+             if (signal.aborted) return null;
+             // --- Perform confirmation check logic ---
+             // const confirmationResult = await checkDomainAvailability(domainToConfirm, providers, signal, confirmationProgressCallback);
+             // --- Update the original result in the 'results' array ---
+             // findIndex and update results[index] = confirmationResult;
+
+             // Simulate check
+             await new Promise(res => setTimeout(res, 50)); // Simulate network delay
+
+             // Update progress after confirmation check
+             confirmedDomainsProcessed++;
+              if (!signal.aborted) {
+                  // Use updateProgress
+                  updateProgress(
+                      CheckStage.CONFIRMATION_QUERY,
+                      (confirmedDomainsProcessed / (totalConfirmationDomains || 1)) * 100,
+                      `Confirmed ${domainToConfirm}. (${confirmedDomainsProcessed}/${totalConfirmationDomains})`,
+                      domainToConfirm
+                  );
+              }
+              return domainToConfirm; // Placeholder return
+        }));
+
+        await Promise.all(confirmationPromises);
+        // Use updateProgress
+        updateProgress(CheckStage.CONFIRMATION_QUERY, 100, 'Confirmation checks complete.', null); // Mark stage complete
+    }
+
+    // Check if aborted during confirmation
+    if (signal.aborted) throw new Error('Aborted during confirmation checks');
+
+    // 4. Analyzing Stage
+    // Use updateProgress
+    updateProgress(CheckStage.ANALYZING, 0, 'Analyzing results...', null);
+    // Perform analysis if needed
+    await new Promise(resolve => setTimeout(resolve, 50)); // Simulate analysis time
+    // Use updateProgress
+    updateProgress(CheckStage.ANALYZING, 100, 'Analysis complete.', null);
+
+    // Check if aborted during analysis
+    if (signal.aborted) throw new Error('Aborted during analysis');
+
+    // 5. Finalizing Stage
+    // Use updateProgress
+    updateProgress(CheckStage.FINALIZING, 0, 'Finalizing and sorting results...', null);
+    // Sort results or perform final tasks
+    results.sort((a, b) => a.domain.localeCompare(b.domain)); // Example sort
+    await new Promise(resolve => setTimeout(resolve, 50)); // Simulate finalization time
+    // Use updateProgress
+    updateProgress(CheckStage.FINALIZING, 100, 'Finalization complete.', null);
+
+    // Check if aborted just before sending final result
+    if (signal.aborted) throw new Error('Aborted before finalizing');
+
+    // 6. Complete
+    self.postMessage({
         type: 'progress',
         progressState: {
-          percentage,
-          domainsProcessed,
-          totalDomains,
-          stage: CheckStage.PRIMARY_QUERY,
-          detailedMessage: `Processed ${domainsProcessed} of ${totalDomains} domains`,
-          providers: providersArray,
-          errors: errorMessages.length > 0 ? [...errorMessages] : undefined,
-          retriesAttempted: totalRetries,
-          ...additionalState
+            percentage: 100,
+            stage: CheckStage.COMPLETE,
+            domainsProcessed: totalDomains, // Final count
+            totalDomains: totalDomains,
+            detailedMessage: 'All checks complete!',
+            providers: Array.from(activeProviders.entries()).map(([url, active]) => ({ url, active })),
+            errors: errorMessages.length > 0 ? [...errorMessages] : undefined,
+            retriesAttempted: totalRetries
         }
-      } as DomainCheckProgress);
-    };
-
-    // Create an async function to check a single domain
-    const checkDomain = async (tld: string, index: number): Promise<DomainResult> => {
-      const fullDomain = `${domainName}${tld}`;
-      
-      try {
-        // Get the provider URL for this specific wildcard check
-        const wildcardProviderUrl = getNextWildcardProviderUrl();
-        
-        // Update provider status and collect errors
-        let domainErrors: string[] = [];
-        
-        // Send progress update that we're starting this domain
-        self.postMessage({
-          type: 'progress',
-          progressState: {
-            currentDomain: fullDomain,
-            stage: CheckStage.PREPARING,
-            detailedMessage: `Starting check for ${fullDomain}`,
-            currentStageStartTime: Date.now(),
-            providers: Array.from(activeProviders.entries()).map(([url, active]) => ({
-              url,
-              active
-            }))
-          }
-        } as DomainCheckProgress);
-        
-        // Perform the domain check and track current stage
-        const result = await checkDomainAvailability(
-          fullDomain, 
-          [wildcardProviderUrl],
-          undefined, // abortSignal
-          (progressState: ProgressState) => {
-            // Forward detailed progress updates from the domain checker
-            self.postMessage({
-              type: 'progress',
-              progressState: {
-                ...progressState,
-                currentDomain: fullDomain,
-                providers: Array.from(activeProviders.entries()).map(([url, active]) => ({
-                  url,
-                  active
-                }))
-              }
-            } as DomainCheckProgress);
-          }
-        );
-
-        // Add any retries from this domain to the total
-        if (result.retriesAttempted) {
-          totalRetries += result.retriesAttempted;
-        }
-        
-        // Provider is active if we got a result without throwing
-        updateProviderStatus(wildcardProviderUrl.baseUrl, true);
-        
-        // Update progress
-        updateProgress();
-        
-        // Send individual result immediately
-        self.postMessage({
-          type: 'single_result',
-          result
-        } as DomainCheckSingleResult);
-        
-        return result;
-      } catch (error) {
-        // Handle individual domain errors using the imported handler
-        console.error(`Worker: Error checking ${fullDomain}:`, error);
-        const { category, message, suggestsDomainExists } = handleError(
-          `Worker check for ${fullDomain}`,
-          error instanceof Error ? error : new Error(String(error)),
-          fullDomain
-        );
-
-        // Mark provider as failed
-        const wildcardProviderUrl = DOH_PROVIDER_URLS[currentWildcardProviderIndex === 0 ? DOH_PROVIDER_URLS.length - 1 : currentWildcardProviderIndex - 1];
-        updateProviderStatus(wildcardProviderUrl, false);
-        
-        // Determine status based on error type
-        const status = suggestsDomainExists ? DomainAvailabilityStatus.REGISTERED : DomainAvailabilityStatus.ERROR;
-
-        // Track error message
-        const errorMessage = `Error checking ${fullDomain}: ${message}`;
-        // Add to global errors list (limiting to avoid overwhelming the UI)
-        if (errorMessages.length < 5) {
-          errorMessages.push(errorMessage);
-        } else if (errorMessages.length === 5) {
-          errorMessages.push('Additional errors occurred...');
-        }
-        
-        // Post specific error message for this domain
-        self.postMessage({
-          type: 'error',
-          message: errorMessage,
-          domain: fullDomain
-        } as DomainCheckError);
-
-        // Update progress even after an error
-        updateProgress(1, {
-          errors: [...errorMessages]
-        });
-
-        // Create error result
-        const errorResult = {
-          domain: fullDomain,
-          status: status,
-          error: status === DomainAvailabilityStatus.ERROR,
-          errorCategory: category,
-          errorMessage: message,
-          link: generateLink(fullDomain, status),
-          confidenceReasons: [
-            `Worker Error: ${message}`,
-            suggestsDomainExists ? 'Error type suggests domain might be registered.' : 'Could not determine status.'
-          ],
-          dnssecValidated: undefined,
-          wildcardDetected: undefined,
-          isParkedByNs: false,
-          isParkedByTxt: false
-        };
-        
-        // Send individual error result immediately
-        self.postMessage({
-          type: 'single_result',
-          result: errorResult
-        } as DomainCheckSingleResult);
-        
-        // Return error result
-        return errorResult;
-      }
-    };
-
-    // Create an array of promises with concurrency control
-    const domainCheckPromises = tlds.map((tld, index) => 
-      limiter.add(() => checkDomain(tld, index))
-    );
-
-    // Wait for all promises to settle
-    const settledPromises = await Promise.allSettled(domainCheckPromises);
-
-    // Process the results
-    settledPromises.forEach((result, index) => {
-      if (result.status === 'fulfilled') {
-        results.push(result.value);
-      } else {
-        // This should rarely happen as errors are already handled in checkDomain
-        const tld = tlds[index];
-        const fullDomain = `${domainName}${tld}`;
-        console.error(`Unhandled promise rejection for ${fullDomain}:`, result.reason);
-        
-        // Create a fallback error result
-        const errorResult: DomainResult = {
-          domain: fullDomain,
-          status: DomainAvailabilityStatus.ERROR,
-          error: true,
-          errorCategory: ErrorCategory.UNKNOWN,
-          errorMessage: `Unhandled error: ${result.reason}`,
-          link: generateLink(fullDomain, DomainAvailabilityStatus.ERROR),
-          confidenceReasons: ['Worker encountered an unhandled promise rejection'],
-          dnssecValidated: undefined,
-          wildcardDetected: undefined,
-          isParkedByNs: false,
-          isParkedByTxt: false
-        };
-        
-        results.push(errorResult);
-      }
-    });
-
-    // Final progress update before sending results
-    self.postMessage({
-      type: 'progress',
-      progressState: {
-        percentage: 100,
-        stage: CheckStage.COMPLETE,
-        domainsProcessed: totalDomains,
-        totalDomains: totalDomains,
-        detailedMessage: 'All domain checks complete',
-        providers: Array.from(activeProviders.entries()).map(([url, active]) => ({
-          url,
-          active
-        })),
-        errors: errorMessages.length > 0 ? [...errorMessages] : undefined
-      }
     } as DomainCheckProgress);
 
-    // Send final results
-    self.postMessage({
-      type: 'result',
-      results
-    } as DomainCheckResult);
+    // Send the final aggregated results (optional if single_result is sufficient)
+    // self.postMessage({ type: 'result', results } as DomainCheckResult);
 
-  } catch (error) {
-    // Handle unexpected global errors in the worker
-    console.error("Worker: Global error:", error);
-    self.postMessage({
-      type: 'error',
-      message: `Worker encountered unexpected error: ${error instanceof Error ? error.message : String(error)}`
-    } as DomainCheckError);
+  } catch (error: any) {
+     if (error.name === 'AbortError' || error.message?.includes('Aborted')) {
+         console.log('Worker: Job aborted cleanly.');
+         // Post a cancelled status update using the function
+         // Ensure updateProgress is callable here if defined inside try
+         // Note: Moved postProgressUpdate outside, so updateProgress wrapper works
+         updateProgress(
+            CheckStage.CANCELLED,
+            0, // Stage progress percent for cancelled
+            'Domain check cancelled by user.',
+            null // Clear current domain
+         );
+     } else {
+        console.error('Worker: Unhandled error during check:', error);
+        const fatalErrorMessage = `Fatal: ${error.message || 'Unknown error'}`;
+        errorMessages.push(fatalErrorMessage);
+
+        // Post a general error status update using the function
+        // Note: Moved postProgressUpdate outside, so updateProgress wrapper works
+        updateProgress(
+            CheckStage.ERROR,
+            (domainsProcessed / (totalDomains || 1)) * 100, // Use last known progress within stage
+            `Worker error: ${error.message || 'Unknown error'}`, // Detailed message
+            null // Clear current domain
+        );
+
+        // Also send specific error message (remains useful for logging/debugging)
+        self.postMessage({ type: 'error', message: `Worker error: ${error.message}` } as DomainCheckError);
+     }
+  } finally {
+      // Clean up the AbortController for this job
+      currentAbortController = null;
+      console.log('Worker: Job finished or aborted.');
+      // Optionally terminate worker if it's meant for single use
+      // self.close();
   }
 };
+
+// Optional: Add error handler for unexpected worker errors
+self.onerror = (event: any) => {
+  let errorMessage = 'Uncaught worker error';
+  let errorObject: any = null;
+
+  if (event instanceof ErrorEvent) {
+    // Standard ErrorEvent
+    errorMessage = event.message || errorMessage;
+    errorObject = event.error;
+    console.error('Worker: Uncaught ErrorEvent:', errorObject, errorMessage);
+  } else if (typeof event === 'string') {
+    // Sometimes errors might be strings
+    errorMessage = event;
+    console.error('Worker: Uncaught string error:', errorMessage);
+  } else {
+    // Other unexpected event type
+    console.error('Worker: Uncaught error (unknown type):', event);
+    errorMessage = 'Uncaught worker error of unknown type';
+    errorObject = event;
+  }
+
+  // Attempt to inform the main thread
+  try {
+    self.postMessage({ type: 'error', message: errorMessage } as DomainCheckError);
+  } catch (e) {
+    console.error("Worker: Failed to post uncaught error message back to main thread.", e);
+  }
+};
+
+console.log('Domain Check Worker initialized.'); // Log worker start
 
 // Export empty object for TypeScript module compatibility if needed,
 // depending on tsconfig settings for workers. Often not strictly required.

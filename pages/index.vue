@@ -61,7 +61,7 @@
       </div>
       
       <!-- Cancel button -->
-      <div class="mt-4 flex justify-center">
+      <div v-if="isChecking && !(progress.stage === CheckStage.COMPLETE || progress.stage === CheckStage.CANCELLED || progress.stage === CheckStage.ERROR)" class="mt-4 flex justify-center">
         <button 
           @click="handleCancel" 
           @keydown.enter="handleCancel"

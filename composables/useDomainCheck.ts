@@ -25,15 +25,16 @@ export const statusMessages = {
 }
 
 export const stageMessages = {
-  [CheckStage.PREPARING]: 'Preparing domain check...',
-  [CheckStage.WILDCARD_CHECK]: 'Checking for wildcard DNS...',
-  [CheckStage.PRIMARY_QUERY]: 'Querying primary DNS providers...',
-  [CheckStage.FALLBACK_QUERY]: 'Performing additional DNS checks...',
-  [CheckStage.ANALYZING]: 'Analyzing DNS responses...',
-  [CheckStage.FINALIZING]: 'Finalizing results...',
-  [CheckStage.COMPLETE]: 'Check complete',
-  [CheckStage.CANCELLED]: 'Check cancelled',
-  [CheckStage.ERROR]: 'Check error'
+  [CheckStage.PREPARING]: 'Preparing domain list...',
+  [CheckStage.WILDCARD_CHECK]: 'Checking for wildcard DNS configuration...',
+  [CheckStage.PRIMARY_QUERY]: 'Performing primary domain checks...',
+  [CheckStage.FALLBACK_QUERY]: 'Performing fallback/validation checks...',
+  [CheckStage.CONFIRMATION_QUERY]: 'Confirming availability status...',
+  [CheckStage.ANALYZING]: 'Analyzing results...',
+  [CheckStage.FINALIZING]: 'Finalizing and sorting results...',
+  [CheckStage.COMPLETE]: 'Check complete!',
+  [CheckStage.CANCELLED]: 'Check cancelled by user.',
+  [CheckStage.ERROR]: 'An error occurred during the check.'
 }
 
 // --- Vue Composable Specifics ---
