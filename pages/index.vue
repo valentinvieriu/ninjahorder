@@ -2,6 +2,14 @@
   <div class="container mx-auto px-4 py-8">
     <h1 class="text-3xl font-bold mb-8 text-center">Domain Availability Checker</h1>
     <DomainForm :initialData="initialFormData" @submit="handleSubmit" />
+    
+    <!-- Cancelled message notification -->
+    <div v-if="wasCancelled" class="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md text-yellow-700">
+      <p class="font-medium text-center">
+        Previous domain check was cancelled. Starting a new search will perform a fresh lookup.
+      </p>
+    </div>
+    
     <div v-if="isChecking" class="mt-8 space-y-4">
       <div class="flex justify-between items-center">
         <p class="text-sm font-semibold text-gray-600">{{ getStageMessage(progress.stage) }}</p>
@@ -90,12 +98,27 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useDomainCheck, stageMessages, CheckStage } from '~/composables/useDomainCheck'
 import { PROVIDERS } from '~/config/appConfig'
 
 const { checkDomains, groupedResults, progress, isChecking, cancelCheck } = useDomainCheck()
 const results = groupedResults
+const wasCancelled = ref(false)
+
+// Watch for cancellation state
+watch(() => progress.value.stage, (newStage) => {
+  if (newStage === CheckStage.CANCELLED) {
+    wasCancelled.value = true
+  }
+})
+
+// Reset cancelled state when starting a new check
+watch(() => isChecking.value, (newValue) => {
+  if (newValue === true) {
+    wasCancelled.value = false
+  }
+})
 
 // Helper function to safely get stage message
 const getStageMessage = (stage: CheckStage): string => {
