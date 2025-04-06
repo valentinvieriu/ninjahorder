@@ -29,8 +29,8 @@ export const stageMessages = {
   [CheckStage.PRIMARY_QUERY]: 'Querying primary DNS providers...',
   [CheckStage.FALLBACK_QUERY]: 'Performing additional DNS checks...',
   [CheckStage.ANALYZING]: 'Analyzing DNS responses...',
-  [CheckStage.FINALIZING]: 'Finalizing results...',
-  [CheckStage.COMPLETE]: 'Check complete'
+  [CheckStage.COMPLETE]: 'Check complete',
+  [CheckStage.CANCELLED]: 'Check cancelled'
 }
 
 // --- Vue Composable Specifics (Stay Here) ---
@@ -58,6 +58,8 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
   const cache = ref<Record<string, CacheEntry>>({})
   let currentProviderIndex = 0
   let worker: Worker | null = null
+  let abortController: AbortController | null = null
+  let currentCacheKey: string | null = null
 
   // Always default to using workers
   const { useWorkers = true } = options
@@ -82,9 +84,47 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
     }
   }
 
+  const cancelCheck = () => {
+    if (!isChecking.value) return
+
+    // Remove the cached entry for the current domain check if it exists
+    if (currentCacheKey && cache.value[currentCacheKey]) {
+      delete cache.value[currentCacheKey]
+      currentCacheKey = null
+    }
+
+    // Abort all ongoing operations
+    if (abortController) {
+      abortController.abort()
+      abortController = null
+    }
+
+    // Notify worker about cancellation if it exists
+    if (worker) {
+      worker.postMessage({ type: 'abort' })
+      cleanupWorker()
+    }
+
+    // Update progress state
+    progress.value = {
+      ...progress.value,
+      stage: CheckStage.CANCELLED,
+      percentage: 0,
+      detailedMessage: 'Domain check cancelled'
+    }
+
+    isChecking.value = false
+  }
+
   const checkDomains = async (domainName: string, selectedTLDs: string[]) => {
+    // Cancel any existing check
+    if (isChecking.value) {
+      cancelCheck()
+    }
+
     const sortedTLDs = [...selectedTLDs].sort()
     const cacheKey = `${domainName}:${sortedTLDs.join(',')}`
+    currentCacheKey = cacheKey
     const cachedEntry = cache.value[cacheKey]
 
     if (cachedEntry && Date.now() - cachedEntry.timestamp < 5 * 60 * 1000) {
@@ -103,7 +143,16 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
     }
     isChecking.value = true
 
+    // Create new AbortController for this check
+    abortController = new AbortController()
+    const { signal } = abortController
+
     try {
+      // Add event listener to handle abort events
+      signal.addEventListener('abort', () => {
+        console.info('[Domain Check] Operation cancelled by user')
+      })
+
       // Only attempt to use workers if they're supported in this environment
       if (useWorkers && typeof Worker !== 'undefined') {
         cleanupWorker()
@@ -116,12 +165,21 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
             return
           }
 
+          // Handle abort events during the promise execution
+          signal.addEventListener('abort', () => {
+            reject(new Error('Domain check cancelled by user'))
+          })
+
           worker.onmessage = (event) => {
+            // If already aborted, ignore any further messages
+            if (signal.aborted) return
+
             const data = event.data as {
-              type: 'progress' | 'result' | 'error';
+              type: 'progress' | 'result' | 'error' | 'single_result';
               progress?: number;
               progressState?: Partial<ProgressState>;
               results?: DomainResult[];
+              result?: DomainResult; // Single result
               message?: string;
               domain?: string;
             };
@@ -135,14 +193,37 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
                   }
                 }
                 break;
+              case 'single_result':
+                if (data.result) {
+                  // Add the single result to our results array
+                  const existingIndex = results.findIndex(r => r.domain === data.result!.domain);
+                  if (existingIndex > -1) {
+                    results[existingIndex] = data.result;
+                  } else {
+                    results.push(data.result);
+                  }
+                  
+                  // Only update the cache if the check hasn't been cancelled
+                  if (!signal.aborted && currentCacheKey) {
+                    cache.value[currentCacheKey] = {
+                      results: JSON.parse(JSON.stringify(results)),
+                      timestamp: Date.now()
+                    };
+                  }
+                }
+                break;
               case 'result':
                 if (Array.isArray(data.results)) {
+                  // This is for backward compatibility - the full array will replace our incremental results
                   results.splice(0, results.length, ...data.results);
                   
-                  cache.value[cacheKey] = {
-                    results: JSON.parse(JSON.stringify(data.results)),
-                    timestamp: Date.now()
-                  };
+                  // Only update the cache if the check hasn't been cancelled
+                  if (!signal.aborted && currentCacheKey) {
+                    cache.value[currentCacheKey] = {
+                      results: JSON.parse(JSON.stringify(data.results)),
+                      timestamp: Date.now()
+                    };
+                  }
                 }
                 
                 progress.value = {
@@ -156,6 +237,8 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
                 isChecking.value = false;
                 
                 cleanupWorker();
+                abortController = null;
+                currentCacheKey = null;
                 
                 resolve(groupedResults.value);
                 break;
@@ -181,10 +264,13 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
                   const existingIndex = results.findIndex(r => r.domain === data.domain);
                   if (existingIndex > -1) {
                     results[existingIndex] = errorResult;
+                  } else {
+                    results.push(errorResult);
                   }
                 } else {
                   isChecking.value = false;
                   cleanupWorker();
+                  abortController = null;
                   reject(new Error(data.message || 'Unknown worker error'));
                 }
                 break;
@@ -195,12 +281,14 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
             console.error('[Domain Check Worker] Error:', error);
             isChecking.value = false;
             cleanupWorker();
+            abortController = null;
             reject(new Error('Worker error: ' + (error.message || 'Unknown error')));
           };
 
           worker.postMessage({
             domainName,
-            tlds: sortedTLDs
+            tlds: sortedTLDs,
+            hasSignal: true // Indicate to worker that we support cancellation
           })
         })
       } else {
@@ -220,6 +308,11 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
           // Create a closure to update progress for this domain
           const domainPromise = (async () => {
             try {
+              // Check if operation was cancelled
+              if (signal.aborted) {
+                throw new Error('Operation cancelled by user')
+              }
+            
               // Use the existing progress object to track status
               progress.value = {
                 ...progress.value,
@@ -228,8 +321,8 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
                 detailedMessage: `Starting check for ${fullDomain}`
               }
               
-              // Call the core domain checking logic
-              const result = await checkDomainAvailability(fullDomain, wildcardProviderUrl)
+              // Call the core domain checking logic with the abort signal
+              const result = await checkDomainAvailability(fullDomain, wildcardProviderUrl, { signal })
               
               // Update progress
               progress.value.domainsProcessed++
@@ -239,6 +332,11 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
               
               return result
             } catch (error) {
+              // If cancelled, rethrow
+              if (signal.aborted) {
+                throw error
+              }
+            
               // Update progress even when error occurs
               progress.value.domainsProcessed++
               progress.value.percentage = (progress.value.domainsProcessed / totalDomains) * 95
@@ -283,75 +381,136 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
         progress.value.stage = CheckStage.FINALIZING
         progress.value.detailedMessage = 'Waiting for all domain queries to complete...'
         
-        // Wait for all domain checks to complete
-        const settledResults = await Promise.allSettled(domainCheckPromises)
-        
-        // Process results
-        const finalResults: DomainResult[] = settledResults.map((result, index) => {
-          const fullDomain = `${domainName}${sortedTLDs[index]}`
-          if (result.status === 'fulfilled') {
-            return result.value
-          } else {
-            // Handle any unexpected errors
-            console.error(`[Domain Check] Unexpected rejection for ${fullDomain}:`, result.reason)
-            const { category, message } = handleError(
-              'Unexpected domain check failure',
-              result.reason instanceof Error ? result.reason : new Error(String(result.reason)),
-              fullDomain
-            )
-            return {
-              domain: fullDomain,
-              status: DomainAvailabilityStatus.ERROR,
-              error: true,
-              errorCategory: category,
-              errorMessage: `Unexpected error: ${message}`,
-              link: generateLink(fullDomain, DomainAvailabilityStatus.ERROR),
-              confidenceReasons: ['An unexpected error occurred during the check.'],
-              dnssecValidated: undefined,
-              wildcardDetected: undefined,
-              isParkedByNs: false,
-              isParkedByTxt: false
+        try {
+          // Wait for all domain checks to complete, but allow for cancellation
+          const settledResults = await Promise.allSettled(domainCheckPromises)
+          
+          // If operation was cancelled, stop processing
+          if (signal.aborted) {
+            throw new Error('Operation cancelled by user')
+          }
+          
+          // Process results
+          const finalResults: DomainResult[] = settledResults.map((result, index) => {
+            const fullDomain = `${domainName}${sortedTLDs[index]}`
+            if (result.status === 'fulfilled') {
+              return result.value
+            } else {
+              // Handle any unexpected errors
+              console.error(`[Domain Check] Unexpected rejection for ${fullDomain}:`, result.reason)
+              
+              // If it was a cancellation, propagate that
+              if (result.reason instanceof Error && result.reason.name === 'AbortError') {
+                throw result.reason
+              }
+              
+              const { category, message } = handleError(
+                'Unexpected domain check failure',
+                result.reason instanceof Error ? result.reason : new Error(String(result.reason)),
+                fullDomain
+              )
+              return {
+                domain: fullDomain,
+                status: DomainAvailabilityStatus.ERROR,
+                error: true,
+                errorCategory: category,
+                errorMessage: `Unexpected error: ${message}`,
+                link: generateLink(fullDomain, DomainAvailabilityStatus.ERROR),
+                confidenceReasons: ['An unexpected error occurred during the check.'],
+                dnssecValidated: undefined,
+                wildcardDetected: undefined,
+                isParkedByNs: false,
+                isParkedByTxt: false
+              }
+            }
+          })
+          
+          // Update final results
+          results.splice(0, results.length, ...finalResults)
+          
+          // Update progress to complete
+          progress.value = {
+            percentage: 100,
+            stage: CheckStage.COMPLETE,
+            domainsProcessed: totalDomains,
+            totalDomains,
+            detailedMessage: 'All domain checks complete'
+          }
+          
+          // Only update the cache if the check hasn't been cancelled
+          if (!signal.aborted && currentCacheKey) {
+            cache.value[currentCacheKey] = {
+              results: JSON.parse(JSON.stringify(finalResults)),
+              timestamp: Date.now()
             }
           }
-        })
-        
-        // Update final results
-        results.splice(0, results.length, ...finalResults)
-        
-        // Update progress to complete
-        progress.value = {
-          percentage: 100,
-          stage: CheckStage.COMPLETE,
-          domainsProcessed: totalDomains,
-          totalDomains,
-          detailedMessage: 'All domain checks complete'
+          
+          isChecking.value = false
+          abortController = null
+          currentCacheKey = null
+          return groupedResults.value
+        } catch (error) {
+          // If operation was cancelled, update progress
+          if (error instanceof Error && (error.name === 'AbortError' || signal.aborted)) {
+            progress.value = {
+              ...progress.value,
+              stage: CheckStage.CANCELLED,
+              detailedMessage: 'Domain check cancelled'
+            }
+            isChecking.value = false
+            abortController = null
+            currentCacheKey = null
+            return groupedResults.value
+          }
+          
+          // Rethrow other errors
+          throw error
         }
-        
-        // Cache results
-        cache.value[cacheKey] = {
-          results: JSON.parse(JSON.stringify(finalResults)),
-          timestamp: Date.now()
-        }
-        
-        isChecking.value = false
-        return groupedResults.value
       }
     } catch (error) {
-      console.error('[Domain Check] Error:', error)
+      // If operation was cancelled by the user, handle accordingly
+      if (error instanceof Error && (error.name === 'AbortError' || signal?.aborted)) {
+        console.info('[Domain Check] Operation cancelled by user')
+        progress.value = {
+          ...progress.value,
+          stage: CheckStage.CANCELLED,
+          detailedMessage: 'Domain check cancelled'
+        }
+      } else {
+        console.error('[Domain Check] Error:', error)
+      }
+      
       isChecking.value = false
       cleanupWorker()
-      throw error
+      abortController = null
+      currentCacheKey = null
+      
+      // Only throw non-cancellation errors
+      if (!(error instanceof Error && (error.name === 'AbortError' || signal?.aborted))) {
+        throw error
+      }
+      
+      return groupedResults.value
     }
   }
 
   return {
     checkDomains,
+    cancelCheck,
     results,
     progress,
     isChecking,
     groupedResults,
     statusMessages,
     stageMessages
+  }
+}
+
+// Add cancelled state to the CheckStage enum if it doesn't exist
+// This should be added to the domainCheckerLogic.ts file
+declare module './domainCheckerLogic' {
+  export enum CheckStage {
+    CANCELLED = 'CANCELLED'
   }
 }
 

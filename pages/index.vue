@@ -4,7 +4,7 @@
     <DomainForm :initialData="initialFormData" @submit="handleSubmit" />
     <div v-if="isChecking" class="mt-8 space-y-4">
       <div class="flex justify-between items-center">
-        <p class="text-sm font-semibold text-gray-600">{{ stageMessages[progress.stage] }}</p>
+        <p class="text-sm font-semibold text-gray-600">{{ getStageMessage(progress.stage) }}</p>
         <p class="text-sm font-medium">{{ progress.domainsProcessed }} / {{ progress.totalDomains }} domains</p>
       </div>
       
@@ -51,8 +51,23 @@
           </li>
         </ul>
       </div>
+      
+      <!-- Cancel button -->
+      <div class="mt-4 flex justify-center">
+        <button 
+          @click="handleCancel" 
+          @keydown.enter="handleCancel"
+          class="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-md font-medium transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-gray-400"
+          tabindex="0"
+          aria-label="Cancel domain check"
+        >
+          Cancel Check
+        </button>
+      </div>
     </div>
-    <div v-else-if="hasResults" class="mt-8 space-y-4">
+    
+    <!-- Results section - now shown while checking is in progress too -->
+    <div v-if="hasResults" class="mt-8 space-y-4">
       <h2 class="text-2xl font-semibold mb-4">Results:</h2>
       <div v-if="results.available.length > 0">
         <h3 class="text-xl font-semibold mb-2">Available Domains:</h3>
@@ -76,11 +91,19 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { useDomainCheck, stageMessages } from '~/composables/useDomainCheck'
+import { useDomainCheck, stageMessages, CheckStage } from '~/composables/useDomainCheck'
 import { PROVIDERS } from '~/config/appConfig'
 
-const { checkDomains, groupedResults, progress, isChecking } = useDomainCheck()
+const { checkDomains, groupedResults, progress, isChecking, cancelCheck } = useDomainCheck()
 const results = groupedResults
+
+// Helper function to safely get stage message
+const getStageMessage = (stage: CheckStage): string => {
+  if (!stage || !(stage in stageMessages)) {
+    return 'Processing...'
+  }
+  return stageMessages[stage as keyof typeof stageMessages] || 'Processing...'
+}
 
 const initialFormData = ref({
   domain: '',
@@ -131,5 +154,9 @@ const providerStatusClass = (provider: { status: string }) => {
 
 const handleSubmit = async (data: { domain: string, tlds: string[] }) => {
   await checkDomains(data.domain, data.tlds)
+}
+
+const handleCancel = () => {
+  cancelCheck()
 }
 </script>

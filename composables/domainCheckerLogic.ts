@@ -328,7 +328,12 @@ export const handleError = (context: string, error: Error, domain?: string): {
   }
 
 // DNS Fetching Logic
-export const fetchDnsJson = async (providerUrl: string, domain: string, recordType: number): Promise<DoHJsonResponse> => {
+export const fetchDnsJson = async (
+  providerUrl: string, 
+  domain: string, 
+  recordType: number,
+  signal?: AbortSignal
+): Promise<DoHJsonResponse> => {
     const config = getProviderConfigFromUrl(providerUrl);
     if (!config) {
       throw new Error(`Configuration error: Unknown DNS provider URL: ${providerUrl}`);
@@ -350,16 +355,19 @@ export const fetchDnsJson = async (providerUrl: string, domain: string, recordTy
           default: recordTypeStr = recordType.toString();
         }
 
+        // Pass signal to the resolver
         const data = await resolver.query(
           domain,
           recordType,
           'GET',
           config.headers,
-          TIMEOUT_MS
+          TIMEOUT_MS,
+          signal
         ) as DoHJsonResponse;
 
         if (ERROR_CODES_SUGGESTING_DOMAIN_EXISTS.includes(data.Status)) {
-          data.Comment = `DNS server returned ${DNS_STATUS_MESSAGES[data.Status] || 'error code ' + data.Status}. This often happens with registered domains.`
+          const errorMessage = DNS_STATUS_MESSAGES[data.Status] || `Unknown error code ${data.Status}`;
+          console.warn(`[Domain Check Logic] Domain check for ${domain} (${recordTypeStr}) received error code ${data.Status}: ${errorMessage}`);
         }
 
         return data;
@@ -367,6 +375,11 @@ export const fetchDnsJson = async (providerUrl: string, domain: string, recordTy
         const error = rawError instanceof Error ? rawError : new Error(String(rawError));
         lastError = error;
         attempts++;
+
+        // Handle explicit abort signal
+        if (signal?.aborted) {
+          throw new Error('Operation cancelled by user');
+        }
 
         const isTimeout = error instanceof DOMException && error.name === 'AbortError' ||
                           error.message.toLowerCase().includes('timeout');
@@ -823,9 +836,20 @@ export const generateLink = (domain: string, status: DomainAvailabilityStatus): 
 
 
 // Check Domain Availability (Main Logic Function)
-export const checkDomainAvailability = async (domain: string, wildcardCheckProviderUrl: string): Promise<DomainResult> => {
+export const checkDomainAvailability = async (
+  domain: string, 
+  wildcardCheckProviderUrl: string,
+  options?: { signal?: AbortSignal }
+): Promise<DomainResult> => {
     if (PRIMARY_PROVIDER_URLS.length === 0) {
       throw new Error("No primary DoH providers configured.");
+    }
+
+    const signal = options?.signal;
+    
+    // Check for abort before starting
+    if (signal?.aborted) {
+      throw new Error("Domain check was aborted");
     }
 
     const tld = domain.substring(domain.indexOf('.'));
@@ -863,7 +887,7 @@ export const checkDomainAvailability = async (domain: string, wildcardCheckProvi
       const providerConfig = getProviderConfigFromUrl(providerUrl);
       const providerName = providerConfig?.name ?? 'Unknown Provider';
 
-      const nsPromise = fetchDnsJson(providerUrl, domain, DNS_RECORD_TYPE_NS)
+      const nsPromise = fetchDnsJson(providerUrl, domain, DNS_RECORD_TYPE_NS, signal)
         .then(data => ({ status: 'fulfilled' as const, value: data, provider: providerName, queryType: DNS_RECORD_TYPE_NS }))
         .catch(error => {
           const { category, message, suggestsDomainExists } = handleError(`NS query from ${providerName}`, error as Error, domain);
@@ -871,7 +895,7 @@ export const checkDomainAvailability = async (domain: string, wildcardCheckProvi
           return { status: 'rejected' as const, reason: error as Error, provider: providerName, queryType: DNS_RECORD_TYPE_NS, errorCategory: category, errorMessage: message, suggestsDomainExists };
         });
 
-      const txtPromise = fetchDnsJson(providerUrl, domain, DNS_RECORD_TYPE_TXT)
+      const txtPromise = fetchDnsJson(providerUrl, domain, DNS_RECORD_TYPE_TXT, signal)
         .then(data => ({ status: 'fulfilled' as const, value: data, provider: providerName, queryType: DNS_RECORD_TYPE_TXT }))
         .catch(error => {
           const { category, message } = handleError(`TXT query from ${providerName}`, error as Error, domain);
@@ -894,7 +918,7 @@ export const checkDomainAvailability = async (domain: string, wildcardCheckProvi
       const soaPromises = PRIMARY_PROVIDER_URLS.map(providerUrl => {
         const providerConfig = getProviderConfigFromUrl(providerUrl);
         const providerName = providerConfig?.name ?? 'Unknown Provider';
-        return fetchDnsJson(providerUrl, domain, DNS_RECORD_TYPE_SOA)
+        return fetchDnsJson(providerUrl, domain, DNS_RECORD_TYPE_SOA, signal)
           .then(data => ({ status: 'fulfilled' as const, value: data, provider: providerName, queryType: DNS_RECORD_TYPE_SOA }))
           .catch(error => {
             const { category, message, suggestsDomainExists } = handleError(`SOA query from ${providerName}`, error as Error, domain);

@@ -143,6 +143,7 @@ export function makeQuery(qname: string, qtype: string | number): DnsQuery {
  * @param method the request method to use ("GET" or "POST")
  * @param headers headers to send in the DNS request
  * @param timeout the number of milliseconds to wait for a response before aborting the request
+ * @param externalSignal Optional AbortSignal for cancellation
  * @returns the response (if we got any)
  */
 export async function sendDohMsg(
@@ -150,12 +151,18 @@ export async function sendDohMsg(
   url: string,
   method: string = 'POST',
   headers: Record<string, string> = {},
-  timeout: number = 5000
+  timeout: number = 5000,
+  externalSignal?: AbortSignal
 ): Promise<DnsResponse> {
   // Validate the method
   method = method.toUpperCase();
   if (!isMethodAllowed(method)) {
     throw new MethodNotAllowedError(`Method ${method} is not allowed. Use GET or POST.`);
+  }
+
+  // Check if external signal is already aborted
+  if (externalSignal?.aborted) {
+    throw new Error('Operation was cancelled');
   }
 
   // Default headers based on method
@@ -173,6 +180,22 @@ export async function sendDohMsg(
   // Set up timeout with AbortController
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  // Create a signal that aborts if either the timeout occurs or the external signal aborts
+  let signal = controller.signal;
+  
+  // If external signal is provided, listen for its abort event
+  if (externalSignal) {
+    // If external signal is already aborted, abort immediately
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      // Listen for abort events on the external signal
+      externalSignal.addEventListener('abort', () => {
+        controller.abort();
+      });
+    }
+  }
 
   try {
     // Prepare options based on method
@@ -261,6 +284,7 @@ export class DohResolver {
    * @param method Must be either "GET" or "POST"
    * @param headers define HTTP headers to use in the DNS query
    * @param timeout the number of milliseconds to wait for a response before aborting the request
+   * @param signal Optional AbortSignal for cancellation
    * @returns The DNS response received
    * @throws {MethodNotAllowedError} If the method is not allowed (i.e. if it's not "GET" or "POST"), a MethodNotAllowedError will be thrown.
    */
@@ -269,12 +293,13 @@ export class DohResolver {
     qtype: string | number = 'A',
     method: string = 'POST',
     headers: Record<string, string> = { 'Accept': 'application/dns-json' },
-    timeout: number = 5000
+    timeout: number = 5000,
+    signal?: AbortSignal
   ): Promise<DnsResponse> {
     // Create the DNS query packet
     const packet = makeQuery(qname, qtype);
 
     // Send the DNS message and return the response
-    return sendDohMsg(packet, this.nameserver_url, method, headers, timeout);
+    return sendDohMsg(packet, this.nameserver_url, method, headers, timeout, signal);
   }
 } 

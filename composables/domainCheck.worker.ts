@@ -43,6 +43,11 @@ interface DomainCheckResult {
   results: DomainResult[]; // Use the imported type
 }
 
+interface DomainCheckSingleResult {
+  type: 'single_result';
+  result: DomainResult; // Single result
+}
+
 interface DomainCheckError {
   type: 'error';
   message: string;
@@ -203,6 +208,12 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
         // Update progress
         updateProgress();
         
+        // Send individual result immediately
+        self.postMessage({
+          type: 'single_result',
+          result
+        } as DomainCheckSingleResult);
+        
         return result;
       } catch (error) {
         // Handle individual domain errors using the imported handler
@@ -241,8 +252,8 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
           errors: [...errorMessages]
         });
 
-        // Return error result
-        return {
+        // Create error result
+        const errorResult = {
           domain: fullDomain,
           status: status,
           error: status === DomainAvailabilityStatus.ERROR,
@@ -258,6 +269,15 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
           isParkedByNs: false,
           isParkedByTxt: false
         };
+        
+        // Send individual error result immediately
+        self.postMessage({
+          type: 'single_result',
+          result: errorResult
+        } as DomainCheckSingleResult);
+        
+        // Return error result
+        return errorResult;
       }
     };
 

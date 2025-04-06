@@ -1,5 +1,8 @@
 <template>
-  <div class="bg-white rounded-lg shadow-md mb-4 overflow-visible">
+  <div 
+    class="bg-white rounded-lg shadow-md mb-4 overflow-visible transition-all duration-300"
+    :class="{ 'animate-pulse-once': isNew }"
+  >
     <div class="grid grid-cols-12 p-4 gap-3 items-center">
       <!-- Domain and Status Information - left side -->
       <div class="col-span-6 flex items-center space-x-3">
@@ -114,7 +117,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { DomainAvailabilityStatus } from '~/composables/useDomainCheck'
 
 const props = defineProps<{
@@ -130,6 +133,16 @@ const props = defineProps<{
     isParkedByTxt: boolean
   }
 }>()
+
+// Animation for newly added results
+const isNew = ref(true)
+
+onMounted(() => {
+  // Reset the animation state after a short delay
+  setTimeout(() => {
+    isNew.value = false
+  }, 1500)
+})
 
 const isParkedDomain = computed(() => {
   return props.result.isParkedByNs || props.result.isParkedByTxt
@@ -264,5 +277,16 @@ const buttonText = computed(() => {
 .relative:hover .group-hover\:opacity-100 {
   opacity: 1;
   visibility: visible;
+}
+
+/* Create a custom animation for new results */
+@keyframes pulse-once {
+  0% { background-color: rgba(0, 0, 0, 0.05); }
+  50% { background-color: rgba(0, 0, 0, 0); }
+  100% { background-color: rgba(0, 0, 0, 0); }
+}
+
+.animate-pulse-once {
+  animation: pulse-once 1.5s ease-in-out;
 }
 </style>
