@@ -4,6 +4,8 @@ import {
   DNS_RECORD_TYPE_NS, 
   DNS_RECORD_TYPE_SOA, 
   DNS_RECORD_TYPE_TXT,
+  DNS_STATUS_NOERROR,
+  DNS_STATUS_SERVFAIL,
   DOMAIN_CHECK_ERRORS_SUGGESTING_DOMAIN_EXISTS 
 } from './constants'
 import { 
@@ -22,6 +24,76 @@ import {
   ErrorCategory,
   DomainAvailabilityStatus
 } from './types'
+
+/**
+ * Performs a confirmation check for domains initially flagged as available
+ * Uses different query approach to validate the initial finding
+ */
+async function performConfirmationCheck(
+    domain: string,
+    providers: DohProvider[],
+    abortSignal?: AbortSignal
+): Promise<{ 
+    status: 'fulfilled', 
+    value: DnsResponse, 
+    provider: string, 
+    queryType: number 
+}[] | { 
+    status: 'rejected', 
+    reason: Error, 
+    provider: string, 
+    queryType: number, 
+    errorCategory?: ErrorCategory, 
+    errorMessage?: string, 
+    suggestsDomainExists?: boolean 
+}[]> {
+    // Use a subset of providers, focusing on the reliable ones
+    const confirmationProviders = providers.slice(0, 2); // Use first two providers
+    const queryPromises: Promise<any>[] = [];
+    
+    // Focus on SOA records for confirmation as they're definitive
+    confirmationProviders.forEach(provider => {
+        queryPromises.push(
+            fetchDnsJson(provider, domain, DNS_RECORD_TYPE_SOA, abortSignal)
+                .then(value => ({ status: 'fulfilled' as const, value, provider: provider.name, queryType: DNS_RECORD_TYPE_SOA }))
+                .catch(error => {
+                    const { category, message, suggestsDomainExists } = handleError(
+                        `Confirmation SOA query from ${provider.name}`,
+                        error instanceof Error ? error : new Error(String(error)),
+                        domain
+                    )
+                    
+                    return {
+                        status: 'rejected' as const,
+                        reason: error instanceof Error ? error : new Error(String(error)),
+                        provider: provider.name,
+                        queryType: DNS_RECORD_TYPE_SOA,
+                        errorCategory: category,
+                        errorMessage: message,
+                        suggestsDomainExists
+                    }
+                })
+        )
+    });
+    
+    // Wait for all confirmation queries to complete
+    const results = await Promise.allSettled(queryPromises);
+    return results.map(result => {
+        if (result.status === 'fulfilled') {
+            return result.value;
+        } else {
+            // This should never happen with our Promise.allSettled approach
+            return {
+                status: 'rejected' as const,
+                reason: new Error('Unknown error in confirmation check Promise.allSettled'),
+                provider: 'unknown',
+                queryType: DNS_RECORD_TYPE_SOA,
+                errorCategory: ErrorCategory.UNKNOWN,
+                errorMessage: 'Unknown error in confirmation check Promise.allSettled'
+            }
+        }
+    });
+}
 
 /**
  * Main function to check domain availability
@@ -219,6 +291,44 @@ export default async function checkDomainAvailability(
             confidenceReasons,
             primaryProviderNames
         )
+        
+        // Add double validation for domains flagged as potentially available
+        if (domainResult.status === DomainAvailabilityStatus.PENDING_CONFIRMATION) {
+            updateProgressState(CheckStage.CONFIRMATION_QUERY, 85);
+            
+            try {
+                confidenceReasons.push("Performing additional confirmation check for availability.");
+                
+                // Run a focused confirmation check
+                const confirmationResults = await performConfirmationCheck(domain, providers, abortSignal);
+                
+                // We're now stricter in our interpretation - any sign of existence means it's not available
+                const anyRecordsFound = confirmationResults.some(result => 
+                    result.status === 'fulfilled' && 
+                    result.value.Status === DNS_STATUS_NOERROR &&
+                    (result.value.Answer?.length || result.value.Authority?.length)
+                );
+                
+                const anyServfailOrSuggestiveErrors = confirmationResults.some(result =>
+                    (result.status === 'fulfilled' && result.value.Status === DNS_STATUS_SERVFAIL) ||
+                    (result.status === 'rejected' && result.suggestsDomainExists)
+                );
+                
+                if (anyRecordsFound || anyServfailOrSuggestiveErrors) {
+                    // Any signs of existence mean we should be conservative
+                    confidenceReasons.push("Confirmation check found signs of domain existence. Marking as indeterminate.");
+                    domainResult.status = DomainAvailabilityStatus.INDETERMINATE;
+                } else {
+                    // All confirmations still suggest availability
+                    confidenceReasons.push("Confirmation check supports availability finding.");
+                    domainResult.status = DomainAvailabilityStatus.AVAILABLE;
+                }
+            } catch (confirmError) {
+                // If confirmation fails, err on the side of caution
+                confidenceReasons.push(`Confirmation check failed: ${confirmError instanceof Error ? confirmError.message : String(confirmError)}. Marking as indeterminate.`);
+                domainResult.status = DomainAvailabilityStatus.INDETERMINATE;
+            }
+        }
         
         // Log check timing and return result
         const endTime = performance.now()

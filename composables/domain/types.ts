@@ -16,7 +16,8 @@ export enum DomainAvailabilityStatus {
   REGISTERED = 'registered',
   PREMIUM = 'premium',
   INDETERMINATE = 'indeterminate',
-  ERROR = 'error'
+  ERROR = 'error',
+  PENDING_CONFIRMATION = 'pending_confirmation'
 }
 
 // Domain result interface
@@ -28,6 +29,7 @@ export interface DomainResult {
   errorMessage?: string
   link: string
   confidenceReasons: string[]
+  confidenceScore?: number
   dnssecValidated?: boolean
   wildcardDetected?: boolean
   isParkedByNs: boolean
@@ -51,6 +53,7 @@ export enum CheckStage {
   PRIMARY_QUERY = 'primary_query',
   FALLBACK_QUERY = 'fallback_query',
   ANALYZING = 'analyzing',
+  CONFIRMATION_QUERY = 'confirmation_query',
   FINALIZING = 'finalizing',
   COMPLETE = 'complete',
   ERROR = 'error',
