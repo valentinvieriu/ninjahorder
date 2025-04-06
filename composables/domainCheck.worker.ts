@@ -133,6 +133,7 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
     const results: DomainResult[] = []; // Use DomainResult type
     const totalDomains = tlds.length;
     let domainsProcessed = 0;
+    let totalRetries = 0;
 
     // Initial progress update
     self.postMessage({
@@ -142,7 +143,8 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
         stage: CheckStage.PREPARING,
         domainsProcessed: 0,
         totalDomains: totalDomains,
-        detailedMessage: 'Worker preparing parallel domain checks...'
+        detailedMessage: 'Worker preparing parallel domain checks...',
+        currentStageStartTime: Date.now()
       }
     } as DomainCheckProgress);
 
@@ -170,6 +172,7 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
           detailedMessage: `Processed ${domainsProcessed} of ${totalDomains} domains`,
           providers: providersArray,
           errors: errorMessages.length > 0 ? [...errorMessages] : undefined,
+          retriesAttempted: totalRetries,
           ...additionalState
         }
       } as DomainCheckProgress);
@@ -193,6 +196,7 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
             currentDomain: fullDomain,
             stage: CheckStage.PREPARING,
             detailedMessage: `Starting check for ${fullDomain}`,
+            currentStageStartTime: Date.now(),
             providers: Array.from(activeProviders.entries()).map(([url, active]) => ({
               url,
               active
@@ -200,8 +204,31 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
           }
         } as DomainCheckProgress);
         
-        // Perform the domain check
-        const result = await checkDomainAvailability(fullDomain, [wildcardProviderUrl]);
+        // Perform the domain check and track current stage
+        const result = await checkDomainAvailability(
+          fullDomain, 
+          [wildcardProviderUrl],
+          undefined, // abortSignal
+          (progressState: ProgressState) => {
+            // Forward detailed progress updates from the domain checker
+            self.postMessage({
+              type: 'progress',
+              progressState: {
+                ...progressState,
+                currentDomain: fullDomain,
+                providers: Array.from(activeProviders.entries()).map(([url, active]) => ({
+                  url,
+                  active
+                }))
+              }
+            } as DomainCheckProgress);
+          }
+        );
+
+        // Add any retries from this domain to the total
+        if (result.retriesAttempted) {
+          totalRetries += result.retriesAttempted;
+        }
         
         // Provider is active if we got a result without throwing
         updateProviderStatus(wildcardProviderUrl.baseUrl, true);

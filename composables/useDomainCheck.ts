@@ -49,7 +49,7 @@ interface GroupedResults {
   other: DomainResult[]
 }
 
-export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
+export const useDomainCheck = (options: { useWorkers?: boolean; concurrency?: number } = {}) => {
   const results = reactive<DomainResult[]>([])
   const progress = ref<ProgressState>({
     percentage: 0,
@@ -64,8 +64,8 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
   let abortController: AbortController | null = null
   let currentCacheKey: string | null = null
 
-  // Always default to using workers
-  const { useWorkers = true } = options
+  // Always default to using workers and set default concurrency
+  const { useWorkers = true, concurrency = 5 } = options
 
   const groupedResults = computed<GroupedResults>(() => ({
     available: results.filter(result => result.status === DomainAvailabilityStatus.AVAILABLE),
@@ -299,7 +299,8 @@ export const useDomainCheck = (options: { useWorkers?: boolean } = {}) => {
           worker.postMessage({
             domainName,
             tlds: sortedTLDs,
-            hasSignal: true // Indicate to worker that we support cancellation
+            hasSignal: true,
+            concurrencyLimit: concurrency
           })
         })
       } else {

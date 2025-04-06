@@ -32,6 +32,7 @@ export interface DomainResult {
   wildcardDetected?: boolean
   isParkedByNs: boolean
   isParkedByTxt: boolean
+  retriesAttempted?: number
 }
 
 // TXT analysis result interface
@@ -65,7 +66,10 @@ export interface ProgressState {
   totalDomains: number,
   detailedMessage?: string,
   providers?: Array<{ url: string, name?: string, active: boolean }>,
-  errors?: string[]
+  errors?: string[],
+  currentQueryType?: string,
+  currentStageStartTime?: number,
+  retriesAttempted?: number
 }
 
 /**

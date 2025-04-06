@@ -42,6 +42,8 @@ export const PRIMARY_PROVIDER_URLS = [
 // Timeout and retry settings
 export const TIMEOUT_MS = 5000; // 5 seconds timeout
 export const MAX_RETRIES = 1; // Maximum number of retries for transient network/timeout errors
+export const INITIAL_RETRY_DELAY_MS = 250; // Initial delay before retrying
+export const MAX_RETRY_DELAY_MS = 2000; // Maximum delay for retries
 
 // Known TLDs that frequently use wildcards
 export const KNOWN_WILDCARD_TLDS = new Set([

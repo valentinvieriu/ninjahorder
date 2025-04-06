@@ -3,6 +3,8 @@ import { DohResolver } from '~/utils/DohResolver'
 import { 
   TIMEOUT_MS, 
   MAX_RETRIES, 
+  INITIAL_RETRY_DELAY_MS,
+  MAX_RETRY_DELAY_MS,
   getProviderConfigFromUrl 
 } from '~/config/appConfig'
 import { 
@@ -79,19 +81,20 @@ export const fetchDnsJson = async (
 ): Promise<DoHJsonResponse> => {
     let attempts = 0;
     let lastError: Error | null = null;
+    
+    // Convert record type to string for logging
+    let recordTypeStr: string;
+    switch (recordType) {
+      case DNS_RECORD_TYPE_NS: recordTypeStr = 'NS'; break;
+      case DNS_RECORD_TYPE_SOA: recordTypeStr = 'SOA'; break;
+      case DNS_RECORD_TYPE_TXT: recordTypeStr = 'TXT'; break;
+      case DNS_RECORD_TYPE_A: recordTypeStr = 'A'; break;
+      default: recordTypeStr = recordType.toString();
+    }
 
     while (attempts <= MAX_RETRIES) {
       try {
         const resolver = new DohResolver(provider.baseUrl);
-
-        let recordTypeStr: string;
-        switch (recordType) {
-          case DNS_RECORD_TYPE_NS: recordTypeStr = 'NS'; break;
-          case DNS_RECORD_TYPE_SOA: recordTypeStr = 'SOA'; break;
-          case DNS_RECORD_TYPE_TXT: recordTypeStr = 'TXT'; break;
-          case DNS_RECORD_TYPE_A: recordTypeStr = 'A'; break;
-          default: recordTypeStr = recordType.toString();
-        }
 
         // Pass signal to the resolver
         const data = await resolver.query(
@@ -114,22 +117,50 @@ export const fetchDnsJson = async (
         lastError = error;
         attempts++;
 
-        // Handle explicit abort signal
+        // Handle explicit abort signal - Non-retryable
         if (signal?.aborted) {
           throw new Error('Operation cancelled by user');
         }
 
-        const isTimeout = error instanceof DOMException && error.name === 'AbortError' ||
-                          error.message.toLowerCase().includes('timeout');
-        const isTransientServerError = error.message.includes('status') &&
-                                       /status (50[234])/.test(error.message);
+        // Use refined error handling to categorize the error
+        const { category, message, suggestsDomainExists } = handleError(
+          `DNS Query (${provider.name})`, 
+          error, 
+          domain
+        );
+          
+        // Determine if error is retryable
+        const isRetryable = (
+          category === ErrorCategory.TIMEOUT || 
+          category === ErrorCategory.NETWORK ||
+          (category === ErrorCategory.DNS_ERROR && error.message.includes('status') && 
+           /status (50[234])/.test(error.message))
+        ) && attempts <= MAX_RETRIES;
 
-        if ((isTimeout || isTransientServerError) && attempts <= MAX_RETRIES) {
-          console.warn(`[Domain Check Logic] Retrying query for ${domain} (${recordType}) with ${provider.name} (Attempt ${attempts}/${MAX_RETRIES}) after error: ${error.message}`);
-          await new Promise(resolve => setTimeout(resolve, 200));
-          continue;
+        if (isRetryable) {
+          // Implement exponential backoff with jitter
+          const baseDelay = Math.min(
+            INITIAL_RETRY_DELAY_MS * Math.pow(2, attempts - 1), 
+            MAX_RETRY_DELAY_MS
+          );
+          const jitter = baseDelay * 0.2 * (Math.random() - 0.5); // +/- 10% jitter
+          const waitTime = Math.max(0, baseDelay + jitter);
+
+          console.warn(
+            `[DNS] Retrying query for ${domain} (${recordTypeStr}) with ${provider.name} ` +
+            `(Attempt ${attempts}/${MAX_RETRIES}) after ${category} error. ` +
+            `Waiting ${waitTime.toFixed(0)}ms. Error: ${message}`
+          );
+          
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue; // Retry the loop
+        } else {
+          console.warn(
+            `[DNS] Non-retryable error for ${domain} (${recordTypeStr}) with ${provider.name} ` +
+            `after ${attempts} attempt(s): ${message}`
+          );
+          break; // Exit retry loop
         }
-        break;
       }
     }
 
@@ -164,4 +195,4 @@ export const checkWildcardDNS = async (domain: string, provider: DohProvider): P
       console.warn(`[Domain Check Logic] Wildcard check failed for ${domain} via ${providerName}: ${message}. Proceeding as non-wildcard.`)
       throw error // Re-throw so the caller knows the check failed
     }
-} 
+}
