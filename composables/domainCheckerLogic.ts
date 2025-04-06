@@ -928,7 +928,9 @@ export interface ProgressState {
   stage: CheckStage,
   domainsProcessed: number,
   totalDomains: number,
-  detailedMessage?: string
+  detailedMessage?: string,
+  providers?: Array<{ url: string, name?: string, active: boolean }>,
+  errors?: string[]
 }
 
 // Interface extending DnsResponse (if any custom fields were added)

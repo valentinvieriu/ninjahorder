@@ -28,6 +28,7 @@ interface DomainCheckRequest {
   tlds: string[];
   // Optionally receive provider URLs if they can't be imported directly in worker context
   // dohProviderUrls?: string[];
+  concurrencyLimit?: number; // Optional concurrency limit parameter
 }
 
 // Use imported ProgressState for progress messages
@@ -50,20 +51,70 @@ interface DomainCheckError {
 
 // --- Worker State ---
 let currentWildcardProviderIndex = 0; // Keep track of provider for wildcard checks
+let activeProviders = new Map<string, boolean>(); // Track active and failed providers
 
 // Helper to get next provider URL for wildcard checks
 const getNextWildcardProviderUrl = () => {
     // Use the imported DOH_PROVIDER_URLS
     const providerUrl = DOH_PROVIDER_URLS[currentWildcardProviderIndex];
     currentWildcardProviderIndex = (currentWildcardProviderIndex + 1) % DOH_PROVIDER_URLS.length;
+    
+    // Initialize provider status if not already tracking
+    if (!activeProviders.has(providerUrl)) {
+      activeProviders.set(providerUrl, true); // Mark as active by default
+    }
+    
     return providerUrl;
+}
+
+// Track provider status
+const updateProviderStatus = (providerUrl: string, isActive: boolean) => {
+  activeProviders.set(providerUrl, isActive);
+  
+  // Convert map to array for progress updates
+  const providersArray = Array.from(activeProviders.entries()).map(([url, active]) => ({
+    url,
+    active
+  }));
+  
+  return providersArray;
+}
+
+// Simple concurrency limiter implementation
+class ConcurrencyLimiter {
+  private running = 0;
+  private queue: (() => void)[] = [];
+
+  constructor(private readonly maxConcurrent: number) {}
+
+  async add<T>(fn: () => Promise<T>): Promise<T> {
+    // Wait if we've reached the concurrency limit
+    if (this.running >= this.maxConcurrent) {
+      await new Promise<void>(resolve => {
+        this.queue.push(resolve);
+      });
+    }
+
+    this.running++;
+    try {
+      return await fn();
+    } finally {
+      this.running--;
+      if (this.queue.length > 0) {
+        const next = this.queue.shift();
+        next?.();
+      }
+    }
+  }
 }
 
 // --- Message Handler ---
 self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
   try {
-    const { domainName, tlds } = event.data;
+    const { domainName, tlds, concurrencyLimit = 5 } = event.data; // Default to 5 concurrent checks
     currentWildcardProviderIndex = 0; // Reset index for each new batch
+    activeProviders = new Map<string, boolean>(); // Reset provider tracking
+    const errorMessages: string[] = []; // Track error messages for display in UI
 
     if (!domainName || !tlds || !Array.isArray(tlds) || tlds.length === 0) {
       self.postMessage({
@@ -75,6 +126,7 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
 
     const results: DomainResult[] = []; // Use DomainResult type
     const totalDomains = tlds.length;
+    let domainsProcessed = 0;
 
     // Initial progress update
     self.postMessage({
@@ -84,126 +136,189 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest>) => {
         stage: CheckStage.PREPARING,
         domainsProcessed: 0,
         totalDomains: totalDomains,
-        detailedMessage: 'Worker preparing domain checks...'
+        detailedMessage: 'Worker preparing parallel domain checks...'
       }
     } as DomainCheckProgress);
 
-    const domainPercentage = 100 / totalDomains;
+    // Create a concurrency limiter
+    const limiter = new ConcurrencyLimiter(concurrencyLimit);
 
-    for (let i = 0; i < tlds.length; i++) {
-      const tld = tlds[i];
-      const fullDomain = `${domainName}${tld}`;
-
-      // Update progress for starting this domain
-      const currentProgressBase = (i / totalDomains) * 95; // Base percentage for this domain
+    // Update progress based on completed domains
+    const updateProgress = (increment = 1, additionalState: Partial<ProgressState> = {}) => {
+      domainsProcessed += increment;
+      const percentage = Math.min(95, (domainsProcessed / totalDomains) * 95);
+      
+      // Convert provider status map to array
+      const providersArray = Array.from(activeProviders.entries()).map(([url, active]) => ({
+        url,
+        active
+      }));
+      
       self.postMessage({
         type: 'progress',
         progressState: {
-          percentage: currentProgressBase,
-          currentDomain: fullDomain,
-          stage: CheckStage.PREPARING, // Start with preparing stage for this domain
-          domainsProcessed: i,
-          totalDomains: totalDomains,
-          detailedMessage: `Worker starting check for ${fullDomain}`
+          percentage,
+          domainsProcessed,
+          totalDomains,
+          stage: CheckStage.PRIMARY_QUERY,
+          detailedMessage: `Processed ${domainsProcessed} of ${totalDomains} domains`,
+          providers: providersArray,
+          errors: errorMessages.length > 0 ? [...errorMessages] : undefined,
+          ...additionalState
         }
       } as DomainCheckProgress);
+    };
 
+    // Create an async function to check a single domain
+    const checkDomain = async (tld: string, index: number): Promise<DomainResult> => {
+      const fullDomain = `${domainName}${tld}`;
+      
       try {
-        // --- No simulation needed, call the actual function ---
         // Get the provider URL for this specific wildcard check
         const wildcardProviderUrl = getNextWildcardProviderUrl();
-
-        // Call the imported check function
-        // Note: The checkDomainAvailability function itself handles internal stages
-        // like wildcard check, primary query, fallback, analysis.
-        // We only signal the start and completion from the worker loop.
-        const result = await checkDomainAvailability(fullDomain, wildcardProviderUrl);
-
-        // Add the successful result
-        results.push(result);
-
-        // Update progress for completing this domain successfully
+        
+        // Update provider status and collect errors
+        let domainErrors: string[] = [];
+        
+        // Send progress update that we're starting this domain
         self.postMessage({
           type: 'progress',
           progressState: {
-            percentage: ((i + 1) / totalDomains) * 95,
-            domainsProcessed: i + 1,
             currentDomain: fullDomain,
-            stage: CheckStage.FINALIZING, // Mark as finalizing after completion
-            detailedMessage: `Worker completed check for ${fullDomain}`
+            stage: CheckStage.PREPARING,
+            detailedMessage: `Starting check for ${fullDomain}`,
+            providers: Array.from(activeProviders.entries()).map(([url, active]) => ({
+              url,
+              active
+            }))
           }
         } as DomainCheckProgress);
-
+        
+        // Perform the domain check
+        const result = await checkDomainAvailability(fullDomain, wildcardProviderUrl);
+        
+        // Provider is active if we got a result without throwing
+        updateProviderStatus(wildcardProviderUrl, true);
+        
+        // Update progress
+        updateProgress();
+        
+        return result;
       } catch (error) {
         // Handle individual domain errors using the imported handler
         console.error(`Worker: Error checking ${fullDomain}:`, error);
         const { category, message, suggestsDomainExists } = handleError(
-            `Worker check for ${fullDomain}`,
-            error as Error,
-            fullDomain
+          `Worker check for ${fullDomain}`,
+          error as Error,
+          fullDomain
         );
 
+        // Mark provider as failed
+        const wildcardProviderUrl = DOH_PROVIDER_URLS[currentWildcardProviderIndex === 0 ? DOH_PROVIDER_URLS.length - 1 : currentWildcardProviderIndex - 1];
+        updateProviderStatus(wildcardProviderUrl, false);
+        
         // Determine status based on error type
         const status = suggestsDomainExists ? DomainAvailabilityStatus.REGISTERED : DomainAvailabilityStatus.ERROR;
 
-        // Create an error result object
-        const errorResult: DomainResult = {
-            domain: fullDomain,
-            status: status,
-            error: status === DomainAvailabilityStatus.ERROR,
-            errorCategory: category,
-            errorMessage: message,
-            link: generateLink(fullDomain, status), // Use imported generator
-            confidenceReasons: [
-                `Worker Error: ${message}`,
-                suggestsDomainExists ? 'Error type suggests domain might be registered.' : 'Could not determine status.'
-            ],
-            dnssecValidated: undefined,
-            wildcardDetected: undefined, // Could be refined based on specific error context
-            isParkedByNs: false,
-            isParkedByTxt: false
-        };
-
-        // Add the error result to the list
-        results.push(errorResult);
-
+        // Track error message
+        const errorMessage = `Error checking ${fullDomain}: ${message}`;
+        // Add to global errors list (limiting to avoid overwhelming the UI)
+        if (errorMessages.length < 5) {
+          errorMessages.push(errorMessage);
+        } else if (errorMessages.length === 5) {
+          errorMessages.push('Additional errors occurred...');
+        }
+        
         // Post specific error message for this domain
-         self.postMessage({
-           type: 'error',
-           message: `Error checking ${fullDomain}: ${message}`,
-           domain: fullDomain // Include domain in error message
-         } as DomainCheckError);
-
-        // Update progress even after an error for this domain
         self.postMessage({
-          type: 'progress',
-          progressState: {
-            percentage: ((i + 1) / totalDomains) * 95, // Still increment percentage
-            domainsProcessed: i + 1, // Increment processed count
-            currentDomain: fullDomain,
-            stage: CheckStage.FINALIZING, // Mark as finalizing
-            detailedMessage: `Worker encountered error checking ${fullDomain}`
-          }
-        } as DomainCheckProgress);
+          type: 'error',
+          message: errorMessage,
+          domain: fullDomain
+        } as DomainCheckError);
+
+        // Update progress even after an error
+        updateProgress(1, {
+          errors: [...errorMessages]
+        });
+
+        // Return error result
+        return {
+          domain: fullDomain,
+          status: status,
+          error: status === DomainAvailabilityStatus.ERROR,
+          errorCategory: category,
+          errorMessage: message,
+          link: generateLink(fullDomain, status),
+          confidenceReasons: [
+            `Worker Error: ${message}`,
+            suggestsDomainExists ? 'Error type suggests domain might be registered.' : 'Could not determine status.'
+          ],
+          dnssecValidated: undefined,
+          wildcardDetected: undefined,
+          isParkedByNs: false,
+          isParkedByTxt: false
+        };
       }
-    }
+    };
+
+    // Create an array of promises with concurrency control
+    const domainCheckPromises = tlds.map((tld, index) => 
+      limiter.add(() => checkDomain(tld, index))
+    );
+
+    // Wait for all promises to settle
+    const settledPromises = await Promise.allSettled(domainCheckPromises);
+
+    // Process the results
+    settledPromises.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        results.push(result.value);
+      } else {
+        // This should rarely happen as errors are already handled in checkDomain
+        const tld = tlds[index];
+        const fullDomain = `${domainName}${tld}`;
+        console.error(`Unhandled promise rejection for ${fullDomain}:`, result.reason);
+        
+        // Create a fallback error result
+        const errorResult: DomainResult = {
+          domain: fullDomain,
+          status: DomainAvailabilityStatus.ERROR,
+          error: true,
+          errorCategory: ErrorCategory.UNKNOWN,
+          errorMessage: `Unhandled error: ${result.reason}`,
+          link: generateLink(fullDomain, DomainAvailabilityStatus.ERROR),
+          confidenceReasons: ['Worker encountered an unhandled promise rejection'],
+          dnssecValidated: undefined,
+          wildcardDetected: undefined,
+          isParkedByNs: false,
+          isParkedByTxt: false
+        };
+        
+        results.push(errorResult);
+      }
+    });
 
     // Final progress update before sending results
     self.postMessage({
       type: 'progress',
       progressState: {
-        percentage: 100, // Now set to 100
+        percentage: 100,
         stage: CheckStage.COMPLETE,
         domainsProcessed: totalDomains,
         totalDomains: totalDomains,
-        detailedMessage: 'Worker finalizing all domain checks...'
+        detailedMessage: 'All domain checks complete',
+        providers: Array.from(activeProviders.entries()).map(([url, active]) => ({
+          url,
+          active
+        })),
+        errors: errorMessages.length > 0 ? [...errorMessages] : undefined
       }
     } as DomainCheckProgress);
 
-    // Send the final results array
+    // Send final results
     self.postMessage({
       type: 'result',
-      results: results // Send the array of DomainResult objects
+      results
     } as DomainCheckResult);
 
   } catch (error) {
