@@ -9,10 +9,12 @@ import {
   handleError,
   type DohProvider
 } from './domain'
+import { buildDomainCheckCacheKey } from './domain/cache'
 import checkDomainAvailability from './domain/checker'
 
 // --- Re-export Enums and Types ---
 export { DomainAvailabilityStatus, ErrorCategory, CheckStage };
+export { buildDomainCheckCacheKey };
 
 // --- UI Messages ---
 // "Likely Available — Verify" rather than "Available": this app uses recursive
@@ -33,6 +35,7 @@ export const stageMessages = {
   [CheckStage.PRIMARY_QUERY]: 'Performing primary domain checks...',
   [CheckStage.FALLBACK_QUERY]: 'Performing fallback/validation checks...',
   [CheckStage.CONFIRMATION_QUERY]: 'Confirming availability status...',
+  [CheckStage.RDAP_QUERY]: 'Verifying registry data...',
   [CheckStage.ANALYZING]: 'Analyzing results...',
   [CheckStage.FINALIZING]: 'Finalizing and sorting results...',
   [CheckStage.COMPLETE]: 'Check complete!',
@@ -51,6 +54,10 @@ interface GroupedResults {
   notAvailable: DomainResult[]
   premium: DomainResult[]
   other: DomainResult[]
+}
+
+interface CheckDomainOptions {
+  verifyWithRdap?: boolean
 }
 
 export const useDomainCheck = (options: { concurrency?: number } = {}) => {
@@ -116,7 +123,11 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
     isChecking.value = false
   }
 
-  const checkDomains = async (domainName: string, selectedTLDs: string[]) => {
+  const checkDomains = async (
+    domainName: string,
+    selectedTLDs: string[],
+    checkOptions: CheckDomainOptions = {}
+  ) => {
     // Cancel any existing check
     if (isChecking.value) {
       cancelCheck()
@@ -126,9 +137,12 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
     // same FQDNs in the worker. IDN/punycode is intentionally not handled here
     // — the form regex blocks non-ASCII labels today, and a punycode conversion
     // step belongs alongside a relaxed form validation.
-    const normalizedDomain = domainName.trim().toLowerCase()
-    const sortedTLDs = Array.from(new Set(selectedTLDs.map(tld => tld.toLowerCase()))).sort()
-    const cacheKey = `${normalizedDomain}:${sortedTLDs.join(',')}`
+    const verifyWithRdap = Boolean(checkOptions.verifyWithRdap)
+    const { cacheKey, normalizedDomain, sortedTLDs } = buildDomainCheckCacheKey(
+      domainName,
+      selectedTLDs,
+      verifyWithRdap
+    )
     currentCacheKey = cacheKey
     const cachedEntry = cache.value[cacheKey]
 
@@ -328,7 +342,8 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
         worker.postMessage({
           domainName: normalizedDomain,
           tlds: sortedTLDs,
-          concurrencyLimit: concurrency
+          concurrencyLimit: concurrency,
+          verifyWithRdap
         })
       })
       // --- End of Worker Logic ---

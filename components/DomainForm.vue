@@ -84,6 +84,16 @@
     <div v-if="!isTldSelected" class="error-line">
       Select at least one TLD group.
     </div>
+
+    <label class="rdap-toggle" :class="{ selected: verifyWithRdap }">
+      <input
+        type="checkbox"
+        v-model="verifyWithRdap"
+        aria-label="Verify likely available domains with RDAP"
+      />
+      <span>RDAP verify</span>
+      <small>Registry data</small>
+    </label>
   </form>
 </template>
 
@@ -97,6 +107,7 @@ const props = defineProps<{
     popularTLDs: boolean
     countryTLDs: boolean
     customTLDs: boolean
+    verifyWithRdap: boolean
   }
 }>()
 
@@ -106,6 +117,7 @@ const domain = ref(props.initialData.domain)
 const popularTLDsChecked = ref(props.initialData.popularTLDs)
 const countryTLDsChecked = ref(props.initialData.countryTLDs)
 const customTLDsChecked = ref(props.initialData.customTLDs)
+const verifyWithRdap = ref(props.initialData.verifyWithRdap)
 const domainError = ref('')
 
 watch(() => props.initialData, (newValue) => {
@@ -113,6 +125,7 @@ watch(() => props.initialData, (newValue) => {
   popularTLDsChecked.value = newValue.popularTLDs
   countryTLDsChecked.value = newValue.countryTLDs
   customTLDsChecked.value = newValue.customTLDs
+  verifyWithRdap.value = newValue.verifyWithRdap
   validateDomain()
 }, { deep: true })
 
@@ -121,7 +134,7 @@ const isTldSelected = computed(() => {
 })
 
 const isFormValid = computed(() => {
-  return domain.value.length > 0 &&
+  return domain.value.trim().length > 0 &&
          !domainError.value &&
          isTldSelected.value
 })
@@ -166,7 +179,11 @@ const handleSubmit = () => {
   // De-dupe in case a TLD appears in more than one selected group.
   const uniqueTLDs = Array.from(new Set(selectedTLDs))
 
-  emit('submit', { domain: domain.value.trim(), tlds: uniqueTLDs })
+  emit('submit', {
+    domain: domain.value.trim(),
+    tlds: uniqueTLDs,
+    verifyWithRdap: verifyWithRdap.value
+  })
 }
 
 const handleReset = () => {
@@ -195,6 +212,7 @@ const handleReset = () => {
 .panel-header,
 .search-row,
 .tld-panel,
+.rdap-toggle,
 .error-line {
   position: relative;
 }
@@ -288,7 +306,8 @@ h2 {
   margin-top: 12px;
 }
 
-.tld-toggle {
+.tld-toggle,
+.rdap-toggle {
   display: grid;
   gap: 1px;
   min-height: 58px;
@@ -301,34 +320,43 @@ h2 {
   transition: transform 180ms ease, border-color 180ms ease, background 180ms ease, color 180ms ease;
 }
 
-.tld-toggle input {
+.tld-toggle input,
+.rdap-toggle input {
   position: absolute;
   opacity: 0;
   pointer-events: none;
 }
 
-.tld-toggle span {
+.tld-toggle span,
+.rdap-toggle span {
   color: var(--nh-text);
   font-size: 0.92rem;
   font-weight: 900;
 }
 
-.tld-toggle small {
+.tld-toggle small,
+.rdap-toggle small {
   color: oklch(82% 0.04 245 / 0.78);
   font-size: 0.74rem;
   font-weight: 700;
 }
 
-.tld-toggle.selected {
+.tld-toggle.selected,
+.rdap-toggle.selected {
   border-color: oklch(83% 0.145 205 / 0.72);
   background:
     linear-gradient(135deg, oklch(83% 0.145 205 / 0.20), oklch(72% 0.18 300 / 0.12));
   box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.28), 0 0 24px oklch(83% 0.145 205 / 0.14);
 }
 
-.tld-toggle:hover {
+.tld-toggle:hover,
+.rdap-toggle:hover {
   transform: translateY(-1px);
   border-color: oklch(100% 0 0 / 0.30);
+}
+
+.rdap-toggle {
+  margin-top: 8px;
 }
 
 .error-line {

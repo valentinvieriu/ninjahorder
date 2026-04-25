@@ -143,6 +143,7 @@ const initialFormData = ref({
   popularTLDs: true,
   countryTLDs: false,
   customTLDs: false,
+  verifyWithRdap: false,
 })
 
 const hasResults = computed(() =>
@@ -186,8 +187,8 @@ const providerStatusClass = (provider: { status: string }) => {
   }
 }
 
-const handleSubmit = async (data: { domain: string, tlds: string[] }) => {
-  await checkDomains(data.domain, data.tlds)
+const handleSubmit = async (data: { domain: string, tlds: string[], verifyWithRdap: boolean }) => {
+  await checkDomains(data.domain, data.tlds, { verifyWithRdap: data.verifyWithRdap })
 }
 
 const handleCancel = () => {

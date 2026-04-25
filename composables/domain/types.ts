@@ -32,6 +32,22 @@ export interface ProviderStatus {
   errorMessage?: string
 }
 
+export type RdapVerificationStatus =
+  'found' |
+  'not_found' |
+  'unsupported' |
+  'rate_limited' |
+  'error'
+
+export interface RdapVerification {
+  status: RdapVerificationStatus
+  checkedAt: string
+  baseUrl?: string
+  httpStatus?: number
+  errorMessage?: string
+  domainStatuses?: string[]
+}
+
 // Domain result interface
 export interface DomainResult {
   domain: string
@@ -48,6 +64,7 @@ export interface DomainResult {
   isParkedByTxt: boolean
   retriesAttempted?: number
   providerStatuses?: ProviderStatus[]
+  rdapVerification?: RdapVerification
 }
 
 // TXT analysis result interface
@@ -65,6 +82,7 @@ export enum CheckStage {
   WILDCARD_CHECK = 'wildcard_check',
   PRIMARY_QUERY = 'primary_query',
   FALLBACK_QUERY = 'fallback_query',
+  RDAP_QUERY = 'rdap_query',
   ANALYZING = 'analyzing',
   CONFIRMATION_QUERY = 'confirmation_query',
   FINALIZING = 'finalizing',
@@ -93,4 +111,4 @@ export interface ProgressState {
  */
 export interface DoHJsonResponse extends DnsResponse {
   // Any additional properties specific to our implementation
-} 
+}

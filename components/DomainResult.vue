@@ -11,6 +11,7 @@
           <span v-if="result.confidenceScore !== undefined">Confidence {{ result.confidenceScore }}</span>
           <span v-if="result.dnssecValidated">DNSSEC AD</span>
           <span v-if="result.wildcardDetected">Wildcard DNS</span>
+          <span v-if="result.rdapVerification">RDAP {{ rdapStatusLabel }}</span>
         </div>
       </div>
     </div>
@@ -50,6 +51,10 @@
             <div>
               <span>Parking</span>
               <strong>{{ isParkedDomain ? parkingType : 'Not detected' }}</strong>
+            </div>
+            <div>
+              <span>RDAP</span>
+              <strong>{{ result.rdapVerification ? rdapStatusLabel : 'Not checked' }}</strong>
             </div>
           </div>
 
@@ -101,6 +106,14 @@ const props = defineProps<{
     wildcardDetected?: boolean
     isParkedByNs: boolean
     isParkedByTxt: boolean
+    rdapVerification?: {
+      status: string
+      checkedAt: string
+      baseUrl?: string
+      httpStatus?: number
+      errorMessage?: string
+      domainStatuses?: string[]
+    }
   }
 }>()
 
@@ -121,6 +134,23 @@ const parkingType = computed(() => {
   if (props.result.isParkedByNs) return 'NS'
   if (props.result.isParkedByTxt) return 'TXT'
   return 'None'
+})
+
+const rdapStatusLabel = computed(() => {
+  switch (props.result.rdapVerification?.status) {
+    case 'found':
+      return 'Found'
+    case 'not_found':
+      return 'Not found'
+    case 'unsupported':
+      return 'Unsupported'
+    case 'rate_limited':
+      return 'Rate limited'
+    case 'error':
+      return 'Error'
+    default:
+      return 'Not checked'
+  }
 })
 
 const domainLink = computed(() => {
