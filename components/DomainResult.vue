@@ -164,7 +164,7 @@ const statusText = computed(() => {
 
   switch (props.result.status) {
     case DomainAvailabilityStatus.AVAILABLE:
-      return 'Likely Available'
+      return 'Likely Available — Verify'
     case DomainAvailabilityStatus.REGISTERED:
       return 'Registered'
     case DomainAvailabilityStatus.PREMIUM:

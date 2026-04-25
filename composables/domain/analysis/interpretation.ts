@@ -43,6 +43,11 @@ interface ProviderEvidence {
   hasPositiveExistenceSignal: boolean
   vote: ProviderVote
   partialAvailabilitySignal: boolean
+  // True iff at least one query against this provider resulted in a fetch-
+  // level rejection (network, timeout, HTTP error). Used by the worker to
+  // surface structured per-provider health.
+  hasFetchError: boolean
+  firstErrorMessage?: string
 }
 
 export const normalizeDnsName = (name: string): string => name.toLowerCase().replace(/\.$/, '')
@@ -88,6 +93,7 @@ const getEvidence = (providers: Map<string, ProviderEvidence>, provider: string)
       hasPositiveExistenceSignal: false,
       vote: 'indeterminate',
       partialAvailabilitySignal: false,
+      hasFetchError: false,
     }
     providers.set(provider, evidence)
   }
@@ -240,6 +246,9 @@ function analyzeProviderResponses(
     const category = result.errorCategory || ErrorCategory.UNKNOWN
     const message = result.errorMessage || 'Unknown error'
     reasons.push(`Provider ${result.provider}${isPrimaryProvider ? ' (Primary)' : ''} (${queryTypeLabel}): Error - ${message}`)
+
+    evidence.hasFetchError = true
+    if (!evidence.firstErrorMessage) evidence.firstErrorMessage = message
 
     if (category === ErrorCategory.NETWORK || category === ErrorCategory.TIMEOUT) {
       evidence.networkOrTimeoutErrorCount++
@@ -499,6 +508,12 @@ export const interpretCombinedResults = (
     reasons
   )
 
+  const providerStatuses = Array.from(analysis.providerEvidence.values()).map(evidence => ({
+    name: evidence.provider,
+    ok: !evidence.hasFetchError,
+    errorMessage: evidence.firstErrorMessage,
+  }))
+
   return {
     domain,
     status: finalStatus,
@@ -511,6 +526,7 @@ export const interpretCombinedResults = (
     dnssecValidated: analysis.dnssecValidated,
     wildcardDetected: isWildcard,
     isParkedByNs: analysis.parkedNsCount > 0,
-    isParkedByTxt: analysis.parkedTxtConsensusCount > 0
+    isParkedByTxt: analysis.parkedTxtConsensusCount > 0,
+    providerStatuses
   }
 }

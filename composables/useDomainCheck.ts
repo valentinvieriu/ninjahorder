@@ -15,8 +15,12 @@ import checkDomainAvailability from './domain/checker'
 export { DomainAvailabilityStatus, ErrorCategory, CheckStage };
 
 // --- UI Messages ---
+// "Likely Available — Verify" rather than "Available": this app uses recursive
+// DNS only, which cannot prove registry availability (NXDOMAIN can hide
+// registered-but-undelegated, reserved, or premium names). The phrasing nudges
+// the user to confirm with a registrar/RDAP before acting.
 export const statusMessages = {
-  [DomainAvailabilityStatus.AVAILABLE]: 'Likely Available',
+  [DomainAvailabilityStatus.AVAILABLE]: 'Likely Available — Verify',
   [DomainAvailabilityStatus.REGISTERED]: 'Already Registered',
   [DomainAvailabilityStatus.PREMIUM]: 'Premium Domain',
   [DomainAvailabilityStatus.INDETERMINATE]: 'Status Uncertain',
@@ -59,9 +63,8 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
   })
   const isChecking = ref(false)
   const cache = ref<Record<string, CacheEntry>>({})
-  let currentProviderIndex = 0 // Kept for potential future use or reference in other parts
-  let worker: Worker | null = null // Re-added worker declaration
-  let abortController: AbortController | null = null // Re-added abortController declaration
+  let worker: Worker | null = null
+  let abortController: AbortController | null = null
   let currentCacheKey: string | null = null
 
   // Always default concurrency, removed useWorkers

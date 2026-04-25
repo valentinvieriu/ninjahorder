@@ -91,7 +91,7 @@
       </div>
 
       <div v-if="results.available.length > 0" class="result-group">
-        <h3>Likely Available</h3>
+        <h3>Likely Available — Verify</h3>
         <DomainResult v-for="result in results.available" :key="result.domain" :result="result" />
       </div>
       <div v-if="results.premium.length > 0" class="result-group">

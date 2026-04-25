@@ -290,6 +290,25 @@ test('detects an AAAA-only wildcard zone', async () => {
   assert.notEqual(result.status, DomainAvailabilityStatus.AVAILABLE)
 })
 
+test('exposes structured providerStatuses (ok flag per provider)', async () => {
+  const result = await withMockedFetch(({ provider }) => {
+    if (provider === 'Google') {
+      return timeoutError()
+    }
+    return baseResponse(DNS_STATUS_NXDOMAIN)
+  }, () => checkDomainAvailability('mixed-status.test', activeProviders))
+
+  assert.ok(result.providerStatuses, 'providerStatuses should be set on the result')
+  const cloudflare = result.providerStatuses!.find(s => s.name === 'Cloudflare')
+  const google = result.providerStatuses!.find(s => s.name === 'Google')
+
+  assert.ok(cloudflare, 'Cloudflare entry should exist')
+  assert.equal(cloudflare!.ok, true, 'Cloudflare had no fetch errors')
+  assert.ok(google, 'Google entry should exist')
+  assert.equal(google!.ok, false, 'Google should be marked unhealthy due to timeouts')
+  assert.ok(google!.errorMessage, 'Google entry should have an errorMessage')
+})
+
 test('resolveTld matches multi-label public suffixes', () => {
   assert.equal(resolveTld('mybiz.co.uk'), 'co.uk')
   assert.equal(resolveTld('example.com'), 'com')

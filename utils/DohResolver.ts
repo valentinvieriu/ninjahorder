@@ -1,18 +1,14 @@
 /**
  * DNS over HTTPS (DoH) resolver implementation
- * Based on the RFC 8484 standards and best practices
+ *
+ * GET-only. RFC 8484 POST requires the binary application/dns-message wire
+ * format; the previous POST branch JSON-stringified the query packet, which
+ * was non-standard and silently broken against any RFC-strict server.
+ * dns-json over GET is what every active DoH provider in this app supports.
  */
 
-/**
- * Allowed request methods for sending DNS over HTTPS requests.
- * Allowed method are "GET" or "POST"
- */
-export const ALLOWED_REQUEST_METHODS = ['GET', 'POST'];
+export const ALLOWED_REQUEST_METHODS = ['GET'] as const;
 
-/**
- * Custom error class to be thrown when someone tries to send a DoH request
- * with a request method other than "GET" or "POST"
- */
 export class MethodNotAllowedError extends Error {
   constructor(message: string) {
     super(message);
@@ -20,13 +16,8 @@ export class MethodNotAllowedError extends Error {
   }
 }
 
-/**
- * Check if a request method is allowed
- * @param method the request method to test
- * @returns If `method` is "GET" or "POST", return true; return false otherwise.
- */
 export function isMethodAllowed(method: string): boolean {
-  return ALLOWED_REQUEST_METHODS.includes(method.toUpperCase());
+  return ALLOWED_REQUEST_METHODS.includes(method.toUpperCase() as typeof ALLOWED_REQUEST_METHODS[number]);
 }
 
 /**
@@ -137,128 +128,74 @@ export function makeQuery(qname: string, qtype: string | number): DnsQuery {
 }
 
 /**
- * Send a DNS message over HTTPS
- * @param packet the DNS query message to send
- * @param url the url to send the DNS message to
- * @param method the request method to use ("GET" or "POST")
- * @param headers headers to send in the DNS request
- * @param timeout the number of milliseconds to wait for a response before aborting the request
- * @param externalSignal Optional AbortSignal for cancellation
- * @returns the response (if we got any)
+ * Send a DNS message over HTTPS using dns-json over GET.
  */
 export async function sendDohMsg(
   packet: DnsQuery,
   url: string,
-  method: string = 'POST',
+  method: string = 'GET',
   headers: Record<string, string> = {},
   timeout: number = 5000,
   externalSignal?: AbortSignal
 ): Promise<DnsResponse> {
-  // Validate the method
   method = method.toUpperCase();
   if (!isMethodAllowed(method)) {
-    throw new MethodNotAllowedError(`Method ${method} is not allowed. Use GET or POST.`);
+    throw new MethodNotAllowedError(`Method ${method} is not allowed. Only GET is supported.`);
   }
 
-  // Check if external signal is already aborted
   if (externalSignal?.aborted) {
     throw new Error('Operation was cancelled');
   }
 
-  // Default headers based on method
-  const defaultHeaders: Record<string, string> = {};
-  if (method === 'GET') {
-    defaultHeaders['Accept'] = 'application/dns-json';
-  } else if (method === 'POST') {
-    defaultHeaders['Accept'] = 'application/dns-message';
-    defaultHeaders['Content-Type'] = 'application/dns-message';
+  if (!packet.questions || packet.questions.length === 0) {
+    throw new Error('Invalid DNS packet format: at least one question is required');
   }
 
-  // Merge default and custom headers
-  const mergedHeaders = { ...defaultHeaders, ...headers };
+  const mergedHeaders = { Accept: 'application/dns-json', ...headers };
 
-  // Set up timeout with AbortController
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-  // Create a signal that aborts if either the timeout occurs or the external signal aborts
-  let signal = controller.signal;
-  
-  // If external signal is provided, listen for its abort event
   if (externalSignal) {
-    // If external signal is already aborted, abort immediately
     if (externalSignal.aborted) {
       controller.abort();
     } else {
-      // Listen for abort events on the external signal
-      externalSignal.addEventListener('abort', () => {
-        controller.abort();
-      });
+      externalSignal.addEventListener('abort', () => controller.abort());
     }
   }
 
   try {
-    // Prepare options based on method
-    let fetchOptions: RequestInit = {
+    const question = packet.questions[0];
+    const params = new URLSearchParams({
+      name: question.name,
+      type: question.type.toString(),
+    });
+    const fetchUrl = `${url}?${params.toString()}`;
+
+    const response = await fetch(fetchUrl, {
       method,
       headers: mergedHeaders,
-      signal: controller.signal
-    };
+      signal: controller.signal,
+    });
 
-    // For GET method, we need to convert the packet to DNS wire format and encode it for URL
-    // For POST method, we need to send the packet in the body
-    let fetchUrl = url;
-    if (method === 'GET') {
-      // For GET, use dns-json format which most providers support via URL params
-      if (packet.questions && packet.questions.length > 0) {
-        const question = packet.questions[0];
-        const params = new URLSearchParams({
-          name: question.name,
-          type: question.type.toString()
-        });
-        fetchUrl = `${url}?${params.toString()}`;
-      } else {
-        throw new Error('Invalid DNS packet format for GET request');
-      }
-    } else {
-      // For POST, we'd normally use dns-packet library to encode the message
-      // But for simplicity in this implementation, we'll assume the packet is already formatted correctly
-      // This would need to be expanded in a full implementation
-      fetchOptions.body = JSON.stringify(packet);
-    }
-
-    // Make the fetch request
-    const response = await fetch(fetchUrl, fetchOptions);
-
-    // Clear the timeout
     clearTimeout(timeoutId);
 
-    // Check if the response is ok
     if (!response.ok) {
       throw new Error(`HTTP Error: ${response.status} ${response.statusText}`);
     }
 
-    // Parse the response based on content type
     const contentType = response.headers.get('content-type');
     if (contentType?.includes('application/dns-json') || contentType?.includes('application/json')) {
       return await response.json() as DnsResponse;
-    } else if (contentType?.includes('application/dns-message')) {
-      // In a full implementation, we'd use dns-packet to decode the wire format response
-      // But for simplicity, we'll throw an error for now
-      throw new Error('Binary DNS message format not supported in this implementation');
-    } else {
-      throw new Error(`Unexpected content type: ${contentType}`);
     }
+    throw new Error(`Unexpected content type: ${contentType}`);
   } catch (error) {
-    // Clean up timeout if we have an error
     clearTimeout(timeoutId);
 
-    // If it's an AbortError due to our timeout, throw a more descriptive error
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new Error(`DoH request to ${url} timed out after ${timeout}ms`);
     }
 
-    // Re-throw other errors
     throw error;
   }
 }
@@ -279,19 +216,12 @@ export class DohResolver {
 
   /**
    * Perform a DNS lookup for the given query name and type.
-   * @param qname the domain name to query for (e.g. example.com)
-   * @param qtype the type of record we're looking for (e.g. A, AAAA, TXT, MX)
-   * @param method Must be either "GET" or "POST"
-   * @param headers define HTTP headers to use in the DNS query
-   * @param timeout the number of milliseconds to wait for a response before aborting the request
-   * @param signal Optional AbortSignal for cancellation
-   * @returns The DNS response received
-   * @throws {MethodNotAllowedError} If the method is not allowed (i.e. if it's not "GET" or "POST"), a MethodNotAllowedError will be thrown.
+   * Only GET (dns-json) is supported.
    */
   async query(
     qname: string,
     qtype: string | number = 'A',
-    method: string = 'POST',
+    method: string = 'GET',
     headers: Record<string, string> = { 'Accept': 'application/dns-json' },
     timeout: number = 5000,
     signal?: AbortSignal

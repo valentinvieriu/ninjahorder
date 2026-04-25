@@ -20,6 +20,18 @@ export enum DomainAvailabilityStatus {
   PENDING_CONFIRMATION = 'pending_confirmation'
 }
 
+// Per-provider summary surfaced on every DomainResult so consumers (worker
+// progress, UI) can read structured evidence instead of grepping
+// confidenceReasons strings. `ok` is true iff every query against this
+// provider produced a parseable DNS response (NXDOMAIN / NOERROR / SERVFAIL
+// rcode etc.); a fetch-level rejection (timeout, network, HTTP error) flips
+// it to false. `errorMessage` is the first error encountered, for display.
+export interface ProviderStatus {
+  name: string
+  ok: boolean
+  errorMessage?: string
+}
+
 // Domain result interface
 export interface DomainResult {
   domain: string
@@ -35,6 +47,7 @@ export interface DomainResult {
   isParkedByNs: boolean
   isParkedByTxt: boolean
   retriesAttempted?: number
+  providerStatuses?: ProviderStatus[]
 }
 
 // TXT analysis result interface

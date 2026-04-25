@@ -95,16 +95,22 @@ const hashDomain = (input: string): number => {
 const providerHealth = new Map(configuredProviders.map(provider => [provider.baseUrl, true]));
 
 const getProviderProgress = (result?: DomainResult) => {
-  if (result) {
+  if (result?.providerStatuses) {
+    // Use the structured per-provider status produced by the interpretation
+    // layer. Previously this function grepped human-readable strings out of
+    // confidenceReasons, which silently broke whenever the wording shifted.
+    const statusByName = new Map(result.providerStatuses.map(status => [status.name, status]));
     configuredProviders.forEach(provider => {
-      const failed = result.confidenceReasons?.some(reason =>
-        reason.includes(`Provider ${provider.name}`) &&
-        reason.includes('Error -')
-      ) ?? false;
-
-      if (failed) {
+      const status = statusByName.get(provider.name);
+      if (status && !status.ok) {
         providerHealth.set(provider.baseUrl, false);
       }
+    });
+  } else if (result?.error) {
+    // Error-result branch (worker-level catch): no per-query evidence, so
+    // mark every provider unhealthy for this domain.
+    configuredProviders.forEach(provider => {
+      providerHealth.set(provider.baseUrl, false);
     });
   }
 
