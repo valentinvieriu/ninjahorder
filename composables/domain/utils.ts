@@ -1,12 +1,14 @@
 import { namecheapTLDs } from '~/utils/tlds'
 import { DomainAvailabilityStatus } from './types'
+import { resolveTld } from './tld'
 
 /**
  * Generates a registration, information, or visit link for a domain
  * based on its availability status.
  */
 export const generateLink = (domain: string, status: DomainAvailabilityStatus): string => {
-    const tld = '.' + domain.split('.').pop()
+    const resolvedTld = resolveTld(domain)
+    const tld = resolvedTld ? `.${resolvedTld}` : ''
 
     let registrarBaseUrl = `https://domainr.com/`
 

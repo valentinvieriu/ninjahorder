@@ -49,8 +49,9 @@ export const MAX_RETRIES = 1; // Maximum number of retries for transient network
 export const INITIAL_RETRY_DELAY_MS = 250; // Initial delay before retrying
 export const MAX_RETRY_DELAY_MS = 2000; // Maximum delay for retries
 export const DNS_QUERY_TIMEOUT_MS = 2500;
-export const DNS_QUERY_RETRIES = 0;
-export const CONFIRMATION_TIMEOUT_MS = 2000;
+export const DNS_QUERY_RETRIES = 1;
+export const CONFIRMATION_TIMEOUT_MS = 3000;
+export const CONFIRMATION_RETRIES = 1;
 
 // Known TLDs that frequently use wildcards
 export const KNOWN_WILDCARD_TLDS = new Set([

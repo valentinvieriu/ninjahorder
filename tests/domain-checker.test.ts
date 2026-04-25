@@ -3,13 +3,16 @@ import assert from 'node:assert/strict'
 
 import checkDomainAvailability from '../composables/domain/checker'
 import { handleError } from '../composables/domain/dns'
+import { resolveTld } from '../composables/domain/tld'
 import {
   DNS_RECORD_TYPE_A,
+  DNS_RECORD_TYPE_AAAA,
   DNS_RECORD_TYPE_NS,
   DNS_RECORD_TYPE_SOA,
   DNS_RECORD_TYPE_TXT,
   DNS_STATUS_NOERROR,
   DNS_STATUS_NXDOMAIN,
+  DNS_STATUS_SERVFAIL,
 } from '../composables/domain/constants'
 import {
   DomainAvailabilityStatus,
@@ -187,6 +190,112 @@ test('classifies provider health failures without suggesting domain existence', 
   assert.equal(network.category, ErrorCategory.NETWORK)
   assert.equal(network.suggestsDomainExists, false)
   assert.equal(http.suggestsDomainExists, false)
+})
+
+test('SERVFAIL error in handleError does not flag suggestsDomainExists', () => {
+  const servfail = handleError('servfail', new Error('Resolver returned SERVFAIL'), 'example.test')
+  const refused = handleError('refused', new Error('Server REFUSED to answer'), 'example.test')
+  const altServfail = handleError('servfail-alt', new Error('Server Failure (rcode=2)'), 'example.test')
+
+  assert.equal(servfail.category, ErrorCategory.DNS_ERROR)
+  assert.equal(servfail.suggestsDomainExists, false)
+  assert.equal(refused.suggestsDomainExists, false)
+  assert.equal(altServfail.suggestsDomainExists, false)
+})
+
+test('queries SOA from every active provider in the primary phase', async () => {
+  const soaRequestsByProvider = new Map<string, number>()
+
+  await withMockedFetch(({ provider, type }) => {
+    if (type === DNS_RECORD_TYPE_SOA) {
+      soaRequestsByProvider.set(provider, (soaRequestsByProvider.get(provider) ?? 0) + 1)
+    }
+    return baseResponse(DNS_STATUS_NXDOMAIN)
+  }, () => checkDomainAvailability('soa-coverage.test', activeProviders))
+
+  // Both active providers must receive *at least two* SOA queries: one in the
+  // primary phase and one in the confirmation phase. Before the C2 fix the
+  // non-primary provider only received SOA during confirmation (one call), so
+  // asserting ≥2 here is what actually distinguishes the new behavior.
+  assert.ok(
+    (soaRequestsByProvider.get('Cloudflare') ?? 0) >= 2,
+    `Cloudflare should receive >=2 SOA queries (primary + confirmation), got ${soaRequestsByProvider.get('Cloudflare')}`
+  )
+  assert.ok(
+    (soaRequestsByProvider.get('Google') ?? 0) >= 2,
+    `Google should receive >=2 SOA queries (primary + confirmation), got ${soaRequestsByProvider.get('Google')}`
+  )
+})
+
+test('wildcard signal survives sibling probe failure', async () => {
+  const domain = 'partial-probe-wildcard.test'
+
+  const result = await withMockedFetch(({ domain: requestedDomain, provider, type }) => {
+    if (requestedDomain.endsWith(`.${domain}`)) {
+      // A probes succeed and indicate wildcard. AAAA probes time out.
+      // Pre-fix this combination caused Promise.all to reject the entire
+      // wildcard check, throwing away the positive A signal.
+      if (type === DNS_RECORD_TYPE_A) {
+        return baseResponse(DNS_STATUS_NOERROR, {
+          Answer: [{
+            name: `${requestedDomain}.`,
+            type: DNS_RECORD_TYPE_A,
+            TTL: 60,
+            data: '203.0.113.7',
+          }],
+        })
+      }
+      return timeoutError()
+    }
+
+    return baseResponse(DNS_STATUS_NXDOMAIN)
+  }, () => checkDomainAvailability(domain, activeProviders))
+
+  assert.equal(result.wildcardDetected, true, 'wildcard should be detected from the A probe even when AAAA fails')
+  assert.notEqual(result.status, DomainAvailabilityStatus.AVAILABLE)
+})
+
+test('detects an AAAA-only wildcard zone', async () => {
+  const domain = 'aaaa-wildcard.test'
+
+  const result = await withMockedFetch(({ domain: requestedDomain, type }) => {
+    // AAAA probes against the random wildcard subdomain return an AAAA answer
+    // even though A returns nothing.
+    if (requestedDomain.endsWith(`.${domain}`) && type === DNS_RECORD_TYPE_AAAA) {
+      return baseResponse(DNS_STATUS_NOERROR, {
+        Answer: [{
+          name: `${requestedDomain}.`,
+          type: DNS_RECORD_TYPE_AAAA,
+          TTL: 60,
+          data: '2001:db8::1',
+        }],
+      })
+    }
+    if (requestedDomain.endsWith(`.${domain}`) && type === DNS_RECORD_TYPE_A) {
+      return baseResponse(DNS_STATUS_NXDOMAIN)
+    }
+
+    // Apex queries: NS/SOA/TXT all NXDOMAIN — the only thing that previously
+    // would have made this look like the apex is registered is the wildcard.
+    if (requestedDomain === domain) {
+      return baseResponse(DNS_STATUS_NXDOMAIN)
+    }
+
+    return baseResponse(DNS_STATUS_NXDOMAIN)
+  }, () => checkDomainAvailability(domain, activeProviders))
+
+  // Wildcard detected → wildcardDetected true; final status must NOT be
+  // AVAILABLE because wildcard makes availability inference unsafe.
+  assert.equal(result.wildcardDetected, true)
+  assert.notEqual(result.status, DomainAvailabilityStatus.AVAILABLE)
+})
+
+test('resolveTld matches multi-label public suffixes', () => {
+  assert.equal(resolveTld('mybiz.co.uk'), 'co.uk')
+  assert.equal(resolveTld('example.com'), 'com')
+  assert.equal(resolveTld('site.io'), 'io')
+  assert.equal(resolveTld(''), null)
+  assert.equal(resolveTld('singleword'), null)
 })
 
 test('confirmation timeout resolves to indeterminate', async () => {

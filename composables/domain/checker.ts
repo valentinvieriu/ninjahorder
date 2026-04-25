@@ -1,5 +1,6 @@
 import { type DnsResponse } from '~/utils/DohResolver'
 import {
+    CONFIRMATION_RETRIES,
     CONFIRMATION_TIMEOUT_MS,
     DNS_QUERY_RETRIES,
     DNS_QUERY_TIMEOUT_MS,
@@ -25,6 +26,7 @@ import {
   interpretCombinedResults
 } from './analysis/interpretation'
 import { generateLink } from './utils'
+import { resolveTld } from './tld'
 import { 
   type DomainResult,
   CheckStage,
@@ -58,7 +60,7 @@ async function performConfirmationCheck(
             fetchDnsJson(provider, domain, DNS_RECORD_TYPE_SOA, {
                 signal: abortSignal,
                 timeoutMs: CONFIRMATION_TIMEOUT_MS,
-                maxRetries: 0
+                maxRetries: CONFIRMATION_RETRIES
             })
                 .then(value => ({ status: 'fulfilled' as const, value, provider: provider.name, queryType: DNS_RECORD_TYPE_SOA }))
                 .catch(error => {
@@ -122,12 +124,12 @@ export default async function checkDomainAvailability(
         throw new Error('No DNS providers configured')
     }
     
-    // Extract TLD from domain for wildcard checks
-    const domainSplit = domain.split('.')
-    const tld = domainSplit.length > 1 ? domainSplit[domainSplit.length - 1] : null
+    // Extract TLD from domain for wildcard checks. Use longest-suffix match so
+    // multi-label suffixes like .co.uk are recognized rather than reduced to .uk.
+    const tld = resolveTld(domain)
     const isKnownWildcardTld = tld ? (KNOWN_WILDCARD_TLDS.has(tld) || KNOWN_WILDCARD_TLDS.has(`.${tld}`)) : false
     
-    if (isKnownWildcardTld) {
+    if (isKnownWildcardTld && tld) {
         confidenceReasons.push(`Note: TLD .${tld} is known to use wildcard DNS responses.`)
     }
     
@@ -223,18 +225,17 @@ export default async function checkDomainAvailability(
 
         providers.forEach(provider => {
             const isPrimaryProvider = primaryProviderNames.includes(provider.name)
-            
-            // Query for NS records
+
+            // Query NS and SOA on every provider so that registration evidence is
+            // not gated on a single resolver. SOA used to be primary-only as a
+            // load-saving heuristic, but it made one provider's cache state
+            // dispositive for the strongest existence signal.
             primaryQueryPromises.push(
                 queryProvider(provider, DNS_RECORD_TYPE_NS, 'NS', isPrimaryProvider ? 2 : 1)
             )
-            
-            // Only query SOA for primary provider (to reduce load)
-            if (isPrimaryProvider) {
-                primaryQueryPromises.push(
-                    queryProvider(provider, DNS_RECORD_TYPE_SOA, 'SOA', 2)
-                )
-            }
+            primaryQueryPromises.push(
+                queryProvider(provider, DNS_RECORD_TYPE_SOA, 'SOA', isPrimaryProvider ? 2 : 1)
+            )
         })
         
         // Check if aborted before analyzing

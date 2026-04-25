@@ -73,13 +73,24 @@ class ConcurrencyLimiter {
 }
 
 // --- Provider Management ---
-let providerIndex = 0;
 const configuredProviders = ACTIVE_DOH_PROVIDERS
   .map(provider => ({
     name: provider.name,
     baseUrl: provider.baseUrl,
     headers: provider.headers,
   }));
+
+// Stable hash of the FQDN, used to pick the primary resolver deterministically
+// per-domain. Two checks of the same domain in different sessions produce the
+// same primary, which keeps results reproducible. Previously the worker used a
+// module-global counter, which made the primary depend on call order.
+const hashDomain = (input: string): number => {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash * 31 + input.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+};
 
 const providerHealth = new Map(configuredProviders.map(provider => [provider.baseUrl, true]));
 
@@ -118,12 +129,13 @@ const normalizeDomainProgressStage = (stage: CheckStage) => {
   return stage;
 };
 
-// Rotate the primary resolver while still querying every active resolver.
-// This keeps two-provider consensus real without permanently favoring one provider.
-const getOrderedProviders = (): DohProvider[] => {
-  const primaryIndex = providerIndex;
-  providerIndex = (providerIndex + 1) % configuredProviders.length;
-
+// Pick the primary resolver deterministically per-domain. Every active resolver
+// is still queried; only the "primary" tiebreaker weight in the interpretation
+// layer differs between providers. Determinism makes results reproducible
+// across runs of the same domain.
+const getOrderedProviders = (domain: string): DohProvider[] => {
+  if (configuredProviders.length === 0) return [];
+  const primaryIndex = hashDomain(domain) % configuredProviders.length;
   return [
     configuredProviders[primaryIndex],
     ...configuredProviders.filter((_, index) => index !== primaryIndex),
@@ -193,8 +205,9 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort'
           detailedMessage: `Checking ${fullDomain} (${domainsProcessed + 1}/${totalDomains})...`
         });
 
-        // Use all configured providers for real consensus, rotating which one is primary.
-        const providers = getOrderedProviders();
+        // Use all configured providers for real consensus; primary is chosen
+        // deterministically per-domain.
+        const providers = getOrderedProviders(fullDomain);
         
         // Directly use the core domain checking function
         const result = await checkDomainAvailability(

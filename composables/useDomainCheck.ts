@@ -119,17 +119,22 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
       cancelCheck()
     }
 
-    const sortedTLDs = [...selectedTLDs].sort()
-    const cacheKey = `${domainName}:${sortedTLDs.join(',')}`
+    // Normalize input so 'Foo  ' and 'foo' share a cache entry and produce the
+    // same FQDNs in the worker. IDN/punycode is intentionally not handled here
+    // — the form regex blocks non-ASCII labels today, and a punycode conversion
+    // step belongs alongside a relaxed form validation.
+    const normalizedDomain = domainName.trim().toLowerCase()
+    const sortedTLDs = Array.from(new Set(selectedTLDs.map(tld => tld.toLowerCase()))).sort()
+    const cacheKey = `${normalizedDomain}:${sortedTLDs.join(',')}`
     currentCacheKey = cacheKey
     const cachedEntry = cache.value[cacheKey]
 
     if (cachedEntry && Date.now() - cachedEntry.timestamp < 5 * 60 * 1000) {
       results.splice(0, results.length, ...cachedEntry.results)
-      console.info(`[Domain Check] Cache hit for ${domainName} with TLDs: ${sortedTLDs.join(',')}`)
+      console.info(`[Domain Check] Cache hit for ${normalizedDomain} with TLDs: ${sortedTLDs.join(',')}`)
       return groupedResults.value
     }
-    console.info(`[Domain Check] Cache miss or expired for ${domainName} with TLDs: ${sortedTLDs.join(',')}`)
+    console.info(`[Domain Check] Cache miss or expired for ${normalizedDomain} with TLDs: ${sortedTLDs.join(',')}`)
 
     results.splice(0, results.length)
     progress.value = {
@@ -227,10 +232,22 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
                   abortController = null;
 
                   if (currentCacheKey) {
-                     cache.value[currentCacheKey] = {
-                        results: JSON.parse(JSON.stringify(results)),
-                        timestamp: Date.now()
-                     };
+                     // Only cache a run where every result was definitive. Caching
+                     // a run that contains INDETERMINATE or ERROR rows would pin
+                     // transient failures for the full TTL and stop the user from
+                     // recovering by re-checking the same domain. A partial cache
+                     // would also misrepresent the run on cache hit.
+                     const allDefinitive = results.every(result =>
+                        result.status !== DomainAvailabilityStatus.INDETERMINATE &&
+                        result.status !== DomainAvailabilityStatus.ERROR
+                     );
+
+                     if (allDefinitive && results.length > 0) {
+                        cache.value[currentCacheKey] = {
+                           results: JSON.parse(JSON.stringify(results)),
+                           timestamp: Date.now()
+                        };
+                     }
                      currentCacheKey = null;
                   }
 
@@ -306,7 +323,7 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
         };
 
         worker.postMessage({
-          domainName,
+          domainName: normalizedDomain,
           tlds: sortedTLDs,
           concurrencyLimit: concurrency
         })

@@ -6,9 +6,11 @@ import {
   INITIAL_RETRY_DELAY_MS,
   MAX_RETRY_DELAY_MS
 } from '~/config/appConfig'
-import { 
-  DNS_STATUS_MESSAGES, 
+import {
+  DNS_STATUS_MESSAGES,
   DNS_RECORD_TYPE_A,
+  DNS_RECORD_TYPE_AAAA,
+  DNS_RECORD_TYPE_CNAME,
   DNS_RECORD_TYPE_NS,
   DNS_RECORD_TYPE_SOA,
   DNS_RECORD_TYPE_TXT,
@@ -96,9 +98,19 @@ export const handleError = (context: string, error: Error, domain?: string): {
         suggestsDomainExists = false
       }
     } else if (error.message.includes('SERVFAIL') || error.message.includes('Server Failure')) {
+      // SERVFAIL is overwhelmingly transient or DNSSEC-validation related, not
+      // proof of registration. Treat it as uncertainty, not as existence
+      // evidence. The interpretation layer separately tracks SERVFAIL response
+      // statuses to dampen availability scoring.
       category = ErrorCategory.DNS_ERROR
       message = 'DNS server failed to process the query (SERVFAIL)'
-      suggestsDomainExists = true
+      suggestsDomainExists = false
+    } else if (error.message.includes('REFUSED') || error.message.includes('Query Refused')) {
+      // REFUSED means the resolver declined to answer — not evidence of
+      // existence either.
+      category = ErrorCategory.DNS_ERROR
+      message = 'DNS server refused the query (REFUSED)'
+      suggestsDomainExists = false
     } else {
        category = ErrorCategory.DNS_ERROR
        message = `DNS lookup error: ${error.message}`
@@ -167,17 +179,23 @@ export const fetchDnsJson = async (
 
         // Use refined error handling to categorize the error
         const { category, message, suggestsDomainExists } = handleError(
-          `DNS Query (${provider.name})`, 
-          error, 
+          `DNS Query (${provider.name})`,
+          error,
           domain
         );
-          
-        // Determine if error is retryable
+
+        // Extract HTTP status (if any) without depending on the literal substring "status"
+        const httpStatusMatch = error.message.match(/(?:status|http error:?)\s*(\d{3})/i);
+        const httpStatus = httpStatusMatch ? parseInt(httpStatusMatch[1], 10) : null;
+        const isTransientHttp = httpStatus !== null && (httpStatus === 429 || (httpStatus >= 500 && httpStatus <= 504));
+
+        // Determine if error is retryable. Notably we do NOT retry on SERVFAIL/REFUSED
+        // rcodes — those usually indicate authoritative-side issues that won't change
+        // within a few hundred ms.
         const isRetryable = (
-          category === ErrorCategory.TIMEOUT || 
+          category === ErrorCategory.TIMEOUT ||
           category === ErrorCategory.NETWORK ||
-          (category === ErrorCategory.DNS_ERROR && error.message.includes('status') && 
-           /status (50[234])/.test(error.message))
+          (category === ErrorCategory.DNS_ERROR && isTransientHttp)
         ) && attempts <= maxRetries;
 
         if (isRetryable) {
@@ -215,31 +233,70 @@ export const fetchDnsJson = async (
 }
 
 // Check Wildcard DNS
+//
+// Probes a random subdomain for A AND AAAA records. A wildcard zone serving
+// only AAAA or only CNAME would otherwise slip past an A-only probe and a
+// wildcard-but-unregistered-looking name could incorrectly read as available.
+// We use two distinct random labels and require both A and AAAA queries on
+// each to see the wildcard before we trust the negative answer.
+const RESOLVING_RECORD_TYPES = [DNS_RECORD_TYPE_A, DNS_RECORD_TYPE_AAAA, DNS_RECORD_TYPE_CNAME]
+
+const generateRandomLabel = (): string =>
+  `check-${Math.random().toString(36).substring(2, 10)}-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`
+
 export const checkWildcardDNS = async (
   domain: string,
   provider: DohProvider,
   options?: FetchDnsJsonOptions
 ): Promise<boolean> => {
-    const randomSubdomain = `check-${Math.random().toString(36).substring(2, 10)}-${Date.now().toString(36)}`
-    const wildcardTestDomain = `${randomSubdomain}.${domain}`
-
     const providerName = provider.name ?? 'Unknown Provider'
+    const probes = [
+      { label: generateRandomLabel(), recordType: DNS_RECORD_TYPE_A },
+      { label: generateRandomLabel(), recordType: DNS_RECORD_TYPE_AAAA },
+    ]
 
-    try {
-      const data = await fetchDnsJson(provider, wildcardTestDomain, DNS_RECORD_TYPE_A, options)
-      const hasResolvingAnswer = data.Answer?.some(r => [DNS_RECORD_TYPE_A, 5 /* CNAME */, 28 /* AAAA */].includes(r.type)) ?? false;
-      const isWildcardDetected = data.Status === DNS_STATUS_NOERROR && hasResolvingAnswer;
-
-      if (isWildcardDetected) {
-        console.info(`[Domain Check Logic] Wildcard detected for ${domain} via ${providerName} using ${wildcardTestDomain}`)
-      } else {
-         console.info(`[Domain Check Logic] No wildcard detected for ${domain} via ${providerName} using ${wildcardTestDomain} (Status: ${data.Status}, Answers: ${data.Answer?.length ?? 0})`)
+    // Use allSettled so a sibling probe failure (e.g., one type times out)
+    // cannot wipe out a positive wildcard signal from the other probe. We
+    // still re-throw when no probe was positive AND at least one failed, so
+    // the caller can correctly decrement confidence on a fully-failed check.
+    const probeOutcomes = await Promise.allSettled(probes.map(async probe => {
+      const probeDomain = `${probe.label}.${domain}`
+      const data = await fetchDnsJson(provider, probeDomain, probe.recordType, options)
+      const hasResolvingAnswer = data.Answer?.some(r => RESOLVING_RECORD_TYPES.includes(r.type)) ?? false
+      return {
+        probeDomain,
+        recordType: probe.recordType,
+        isWildcard: data.Status === DNS_STATUS_NOERROR && hasResolvingAnswer,
+        status: data.Status,
+        answerCount: data.Answer?.length ?? 0,
       }
-      return isWildcardDetected
+    }))
 
-    } catch (error) {
-      const { message } = handleError(`Wildcard Check (${providerName})`, error as Error, domain)
-      console.warn(`[Domain Check Logic] Wildcard check failed for ${domain} via ${providerName}: ${message}. Proceeding as non-wildcard.`)
-      throw error // Re-throw so the caller knows the check failed
+    const fulfilled = probeOutcomes
+      .filter((o): o is PromiseFulfilledResult<{ probeDomain: string; recordType: number; isWildcard: boolean; status: number; answerCount: number }> => o.status === 'fulfilled')
+      .map(o => o.value)
+    const rejected = probeOutcomes.filter(o => o.status === 'rejected') as PromiseRejectedResult[]
+
+    const isWildcardDetected = fulfilled.some(result => result.isWildcard)
+
+    if (isWildcardDetected) {
+      const positives = fulfilled.filter(result => result.isWildcard).map(result => `${result.probeDomain} (type ${result.recordType})`)
+      console.info(`[Domain Check Logic] Wildcard detected for ${domain} via ${providerName}: ${positives.join(', ')}`)
+      return true
     }
+
+    if (fulfilled.length > 0) {
+      const summary = fulfilled.map(result => `${result.probeDomain} status=${result.status} answers=${result.answerCount}`).join('; ')
+      console.info(`[Domain Check Logic] No wildcard detected for ${domain} via ${providerName} (${summary})`)
+      return false
+    }
+
+    // No probe succeeded — surface the failure so the caller can mark this
+    // provider's wildcard probe as failed.
+    const firstRejection = rejected[0]?.reason instanceof Error
+      ? rejected[0].reason
+      : new Error(String(rejected[0]?.reason ?? 'Unknown wildcard probe error'))
+    const { message } = handleError(`Wildcard Check (${providerName})`, firstRejection, domain)
+    console.warn(`[Domain Check Logic] Wildcard check failed for ${domain} via ${providerName}: ${message}. Proceeding as non-wildcard.`)
+    throw firstRejection
 }

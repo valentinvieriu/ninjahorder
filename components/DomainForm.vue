@@ -163,7 +163,10 @@ const handleSubmit = () => {
   if (countryTLDsChecked.value) selectedTLDs.push(...countryTLDs)
   if (customTLDsChecked.value) selectedTLDs.push(...customTLDs)
 
-  emit('submit', { domain: domain.value, tlds: selectedTLDs })
+  // De-dupe in case a TLD appears in more than one selected group.
+  const uniqueTLDs = Array.from(new Set(selectedTLDs))
+
+  emit('submit', { domain: domain.value.trim(), tlds: uniqueTLDs })
 }
 
 const handleReset = () => {
