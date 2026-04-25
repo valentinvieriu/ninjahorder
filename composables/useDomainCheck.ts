@@ -10,14 +10,13 @@ import {
   type DohProvider
 } from './domain'
 import checkDomainAvailability from './domain/checker'
-import { DOH_PROVIDER_URLS } from '../config/appConfig'
 
 // --- Re-export Enums and Types ---
 export { DomainAvailabilityStatus, ErrorCategory, CheckStage };
 
 // --- UI Messages ---
 export const statusMessages = {
-  [DomainAvailabilityStatus.AVAILABLE]: 'Available',
+  [DomainAvailabilityStatus.AVAILABLE]: 'Likely Available',
   [DomainAvailabilityStatus.REGISTERED]: 'Already Registered',
   [DomainAvailabilityStatus.PREMIUM]: 'Premium Domain',
   [DomainAvailabilityStatus.INDETERMINATE]: 'Status Uncertain',
@@ -201,11 +200,10 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
           if (signal.aborted) return
 
           const data = event.data as {
-            type: 'progress' | 'result' | 'error' | 'single_result';
+            type: 'progress' | 'error' | 'single_result';
             progress?: number;
             progressState?: Partial<ProgressState>;
-            results?: DomainResult[];
-            result?: DomainResult; // Single result
+            result?: DomainResult;
             message?: string;
             domain?: string;
           };
@@ -216,65 +214,60 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
                 progress.value = {
                   ...progress.value,
                   ...data.progressState,
+                };
+
+                const isBatchComplete =
+                  data.progressState.stage === CheckStage.COMPLETE &&
+                  progress.value.totalDomains > 0 &&
+                  progress.value.domainsProcessed >= progress.value.totalDomains;
+
+                if (isBatchComplete) {
+                  isChecking.value = false;
+                  cleanupWorker();
+                  abortController = null;
+
+                  if (currentCacheKey) {
+                     cache.value[currentCacheKey] = {
+                        results: JSON.parse(JSON.stringify(results)),
+                        timestamp: Date.now()
+                     };
+                     currentCacheKey = null;
+                  }
+
+                  resolve(groupedResults.value);
+                }
+                else if (data.progressState.stage === CheckStage.CANCELLED) {
+                    isChecking.value = false;
+                    cleanupWorker();
+                    abortController = null;
+                    currentCacheKey = null;
+                }
+                else if (data.progressState.stage === CheckStage.ERROR) {
+                    isChecking.value = false;
+                    cleanupWorker();
+                    abortController = null;
+                    currentCacheKey = null;
+                    reject(new Error(data.progressState.detailedMessage || 'Worker reported an error state'));
                 }
               }
               break;
             case 'single_result':
               if (data.result) {
-                // Add the single result to our results array
                 const existingIndex = results.findIndex(r => r.domain === data.result!.domain);
                 if (existingIndex > -1) {
                   results[existingIndex] = data.result;
                 } else {
                   results.push(data.result);
                 }
-                
-                // Only update the cache if the check hasn't been cancelled
-                if (!signal.aborted && currentCacheKey) {
-                  cache.value[currentCacheKey] = {
-                    results: JSON.parse(JSON.stringify(results)),
-                    timestamp: Date.now()
-                  };
-                }
               }
-              break;
-            case 'result':
-              if (Array.isArray(data.results)) {
-                // This is for backward compatibility - the full array will replace our incremental results
-                results.splice(0, results.length, ...data.results);
-                
-                // Only update the cache if the check hasn't been cancelled
-                if (!signal.aborted && currentCacheKey) {
-                  cache.value[currentCacheKey] = {
-                    results: JSON.parse(JSON.stringify(data.results)),
-                    timestamp: Date.now()
-                  };
-                }
-              }
-              
-              progress.value = {
-                percentage: 100,
-                stage: CheckStage.COMPLETE,
-                domainsProcessed: sortedTLDs.length,
-                totalDomains: sortedTLDs.length,
-                detailedMessage: 'All domain checks complete'
-              };
-              
-              isChecking.value = false;
-              
-              cleanupWorker();
-              abortController = null;
-              currentCacheKey = null;
-              
-              resolve(groupedResults.value);
               break;
             case 'error':
               console.error(`[Domain Check Worker] ${data.message || 'Unknown error'}`);
-              
+
               if (data.domain) {
-                console.warn(`[Domain Check Worker] Error checking ${data.domain}, continuing...`);
+                console.warn(`[Domain Check Worker] Error checking ${data.domain}, attempting to continue...`);
                 progress.value.detailedMessage = `Error checking ${data.domain}`;
-                
+
                 const errorResult: DomainResult = {
                   domain: data.domain,
                   status: DomainAvailabilityStatus.ERROR,
@@ -286,7 +279,7 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
                   isParkedByNs: false,
                   isParkedByTxt: false
                 };
-                
+
                 const existingIndex = results.findIndex(r => r.domain === data.domain);
                 if (existingIndex > -1) {
                   results[existingIndex] = errorResult;
@@ -297,6 +290,7 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
                 isChecking.value = false;
                 cleanupWorker();
                 abortController = null;
+                currentCacheKey = null;
                 reject(new Error(data.message || 'Unknown worker error'));
               }
               break;
@@ -314,7 +308,6 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
         worker.postMessage({
           domainName,
           tlds: sortedTLDs,
-          // Removed hasSignal, worker manages its own AbortController now
           concurrencyLimit: concurrency
         })
       })

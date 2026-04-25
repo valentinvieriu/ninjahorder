@@ -17,7 +17,7 @@ import {
 } from './domain';
 
 // Import constants from config
-import { DOH_PROVIDER_URLS } from '../config/appConfig';
+import { ACTIVE_DOH_PROVIDERS } from '../config/appConfig';
 
 // Define the interfaces needed for worker communication based on imported types
 interface DomainCheckRequest {
@@ -33,11 +33,6 @@ interface DomainCheckProgress {
 }
 
 // Use imported DomainResult for result messages
-interface DomainCheckResult {
-  type: 'result';
-  results: DomainResult[]; // Use the imported type
-}
-
 interface DomainCheckSingleResult {
   type: 'single_result';
   result: DomainResult; // Single result
@@ -79,16 +74,60 @@ class ConcurrencyLimiter {
 
 // --- Provider Management ---
 let providerIndex = 0;
+const configuredProviders = ACTIVE_DOH_PROVIDERS
+  .map(provider => ({
+    name: provider.name,
+    baseUrl: provider.baseUrl,
+    headers: provider.headers,
+  }));
 
-// Helper to get next provider for domain checks
-const getNextProvider = (): DohProvider => {
-  const providerUrl = DOH_PROVIDER_URLS[providerIndex];
-  providerIndex = (providerIndex + 1) % DOH_PROVIDER_URLS.length;
-  
-  return {
-    name: `Provider-${providerIndex}`,
-    baseUrl: providerUrl,
-  };
+const providerHealth = new Map(configuredProviders.map(provider => [provider.baseUrl, true]));
+
+const getProviderProgress = (result?: DomainResult) => {
+  if (result) {
+    configuredProviders.forEach(provider => {
+      const failed = result.confidenceReasons?.some(reason =>
+        reason.includes(`Provider ${provider.name}`) &&
+        reason.includes('Error -')
+      ) ?? false;
+
+      if (failed) {
+        providerHealth.set(provider.baseUrl, false);
+      }
+    });
+  }
+
+  return configuredProviders.map(provider => ({
+    url: provider.baseUrl,
+    name: provider.name,
+    active: providerHealth.get(provider.baseUrl) ?? true,
+  }));
+};
+
+const resetProviderProgress = () => {
+  configuredProviders.forEach(provider => {
+    providerHealth.set(provider.baseUrl, true);
+  });
+};
+
+const normalizeDomainProgressStage = (stage: CheckStage) => {
+  if (stage === CheckStage.COMPLETE || stage === CheckStage.ERROR) {
+    return CheckStage.FINALIZING;
+  }
+
+  return stage;
+};
+
+// Rotate the primary resolver while still querying every active resolver.
+// This keeps two-provider consensus real without permanently favoring one provider.
+const getOrderedProviders = (): DohProvider[] => {
+  const primaryIndex = providerIndex;
+  providerIndex = (providerIndex + 1) % configuredProviders.length;
+
+  return [
+    configuredProviders[primaryIndex],
+    ...configuredProviders.filter((_, index) => index !== primaryIndex),
+  ];
 };
 
 // --- Main Worker Logic ---
@@ -102,11 +141,11 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort'
 
   // Initialize state
   const { domainName, tlds, concurrencyLimit = 5 } = event.data as DomainCheckRequest;
-  const results: DomainResult[] = [];
   let domainsProcessed = 0;
   const totalDomains = tlds.length;
   const abortController = new AbortController();
   const signal = abortController.signal;
+  resetProviderProgress();
 
   // Post progress update to main thread
   const postProgress = (progressState: Partial<ProgressState>) => {
@@ -130,6 +169,7 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort'
       stage: CheckStage.PREPARING,
       domainsProcessed: 0,
       totalDomains,
+      providers: getProviderProgress(),
       detailedMessage: `Preparing to check ${totalDomains} domains...`
     });
 
@@ -149,23 +189,26 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort'
           percentage: Math.round((domainsProcessed / totalDomains) * 100),
           stage: CheckStage.PRIMARY_QUERY,
           currentDomain: fullDomain,
+          providers: getProviderProgress(),
           detailedMessage: `Checking ${fullDomain} (${domainsProcessed + 1}/${totalDomains})...`
         });
 
-        // Get a provider for this check
-        const provider = getNextProvider();
+        // Use all configured providers for real consensus, rotating which one is primary.
+        const providers = getOrderedProviders();
         
         // Directly use the core domain checking function
         const result = await checkDomainAvailability(
           fullDomain,
-          [provider], // Use selected provider
+          providers,
           signal,     // Pass abort signal
           (progress) => {
             // Forward progress updates to main thread, but preserve our counters
             postProgress({
               ...progress,
+              stage: normalizeDomainProgressStage(progress.stage),
               domainsProcessed, // Preserve domain count
               totalDomains,     // Preserve total count
+              providers: progress.providers ?? getProviderProgress(),
               currentDomain: fullDomain
             });
           }
@@ -173,6 +216,16 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort'
 
         // Post single result immediately
         if (!signal.aborted) {
+          postProgress({
+            percentage: Math.round(((domainsProcessed + 1) / totalDomains) * 100),
+            stage: CheckStage.FINALIZING,
+            domainsProcessed,
+            totalDomains,
+            currentDomain: fullDomain,
+            providers: getProviderProgress(result),
+            detailedMessage: `Finished ${fullDomain}`
+          });
+
           self.postMessage({ 
             type: 'single_result', 
             result 
@@ -233,6 +286,7 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort'
             stage: domainsProcessed === totalDomains ? CheckStage.FINALIZING : CheckStage.PRIMARY_QUERY,
             domainsProcessed,
             totalDomains,
+            providers: getProviderProgress(),
             detailedMessage: `Processed ${domainsProcessed}/${totalDomains} domains`
           });
         }
@@ -240,27 +294,18 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort'
     }));
 
     // Wait for all checks to complete
-    const allResults = await Promise.all(checkPromises);
-    
-    // Filter out null results (from aborted checks)
-    const validResults = allResults.filter(result => result !== null) as DomainResult[];
-    results.push(...validResults);
+    await Promise.all(checkPromises);
     
     // Post completion progress
     postProgress({
       percentage: 100,
       stage: CheckStage.COMPLETE,
-      domainsProcessed: totalDomains,
+      domainsProcessed: totalDomains, // Use totalDomains here as all are processed
       totalDomains,
+      providers: getProviderProgress(),
       detailedMessage: 'All domain checks complete'
     });
-    
-    // Post final results for backward compatibility
-    self.postMessage({ 
-      type: 'result', 
-      results 
-    } as DomainCheckResult);
-    
+
   } catch (error: any) {
     // Handle worker-level errors
     if (error.name === 'AbortError' || error.message?.includes('Aborted')) {

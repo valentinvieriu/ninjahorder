@@ -1,376 +1,504 @@
 import type { DnsResponse } from '~/utils/DohResolver'
-import { 
-  DNS_STATUS_NOERROR, 
-  DNS_STATUS_NXDOMAIN, 
-  DNS_STATUS_SERVFAIL, 
-  DNS_RECORD_TYPE_NS, 
-  DNS_RECORD_TYPE_SOA, 
+import {
+  DNS_STATUS_NOERROR,
+  DNS_STATUS_NXDOMAIN,
+  DNS_STATUS_SERVFAIL,
+  DNS_RECORD_TYPE_NS,
+  DNS_RECORD_TYPE_SOA,
   DNS_RECORD_TYPE_TXT,
   DNS_STATUS_MESSAGES
 } from '../constants'
-import { 
-  DomainAvailabilityStatus, 
+import {
+  DomainAvailabilityStatus,
   ErrorCategory,
-  type DomainResult 
+  type DomainResult
 } from '../types'
-import { PARKING_NAMESERVERS } from './parking'
+import { PARKING_NAMESERVERS, analyzeTxtRecordsForParking } from './parking'
 import { generateLink } from '../utils'
 import type { TxtAnalysisResult } from '../types'
-import { analyzeTxtRecordsForParking } from './parking'
+
+type ProviderResult =
+  { status: 'fulfilled', value: DnsResponse, provider: string, queryType: number } |
+  { status: 'rejected', reason: Error, provider: string, queryType: number, errorCategory?: ErrorCategory, errorMessage?: string, suggestsDomainExists?: boolean }
+
+type ProviderVote = 'available' | 'registered' | 'indeterminate'
+
+interface ProviderEvidence {
+  provider: string
+  queryCount: number
+  nxDomainCount: number
+  noErrorCount: number
+  noErrorWithoutExactAnswersCount: number
+  servFailCount: number
+  otherDnsErrorCount: number
+  networkOrTimeoutErrorCount: number
+  suggestiveErrorCount: number
+  exactAnswerCount: number
+  exactNsOrSoaAnswerCount: number
+  dnssecValidated: boolean
+  parkedByNs: boolean
+  txtAnalysis?: TxtAnalysisResult
+  hasActiveUsageIndicators: boolean
+  hasPremiumSignal: boolean
+  hasPositiveExistenceSignal: boolean
+  vote: ProviderVote
+  partialAvailabilitySignal: boolean
+}
+
+export const normalizeDnsName = (name: string): string => name.toLowerCase().replace(/\.$/, '')
+
+const recordTypeText = (queryType: number): string => {
+  if (queryType === DNS_RECORD_TYPE_NS) return 'NS'
+  if (queryType === DNS_RECORD_TYPE_SOA) return 'SOA'
+  if (queryType === DNS_RECORD_TYPE_TXT) return 'TXT'
+  return String(queryType)
+}
+
+export const hasExactAnswer = (
+  data: DnsResponse,
+  domain: string,
+  recordTypes?: number[]
+): boolean => {
+  const normalizedDomain = normalizeDnsName(domain)
+  return data.Answer?.some(record => {
+    if (normalizeDnsName(record.name) !== normalizedDomain) return false
+    return recordTypes ? recordTypes.includes(record.type) : true
+  }) ?? false
+}
+
+const getEvidence = (providers: Map<string, ProviderEvidence>, provider: string): ProviderEvidence => {
+  let evidence = providers.get(provider)
+  if (!evidence) {
+    evidence = {
+      provider,
+      queryCount: 0,
+      nxDomainCount: 0,
+      noErrorCount: 0,
+      noErrorWithoutExactAnswersCount: 0,
+      servFailCount: 0,
+      otherDnsErrorCount: 0,
+      networkOrTimeoutErrorCount: 0,
+      suggestiveErrorCount: 0,
+      exactAnswerCount: 0,
+      exactNsOrSoaAnswerCount: 0,
+      dnssecValidated: false,
+      parkedByNs: false,
+      hasActiveUsageIndicators: false,
+      hasPremiumSignal: false,
+      hasPositiveExistenceSignal: false,
+      vote: 'indeterminate',
+      partialAvailabilitySignal: false,
+    }
+    providers.set(provider, evidence)
+  }
+
+  return evidence
+}
 
 /**
- * Analyzes provider responses and extracts key metrics and signals
+ * Analyzes provider responses and extracts provider-level evidence.
+ *
+ * The important modeling choice here is that each resolver gets one final vote.
+ * Multiple query types from the same resolver are sub-signals, not independent
+ * consensus.
  */
 function analyzeProviderResponses(
-  providerResults: Array<
-    { status: 'fulfilled', value: DnsResponse, provider: string, queryType: number } |
-    { status: 'rejected', reason: Error, provider: string, queryType: number, errorCategory?: ErrorCategory, errorMessage?: string, suggestsDomainExists?: boolean }
-  >,
+  domain: string,
+  providerResults: ProviderResult[],
   primaryProviderNames: string[],
-  reasons: string[],
-  isWildcard: boolean
+  reasons: string[]
 ) {
-  let nxDomainCount = 0
-  let noErrorWithRecordsCount = 0
-  let noErrorWithoutRecordsCount = 0
-  let servFailCount = 0
-  let otherDnsErrorCount = 0
-  let networkOrTimeoutErrorCount = 0
-  let dnssecValidated = false
-  let parkedNsCount = 0
+  const providerEvidence = new Map<string, ProviderEvidence>()
   const txtAnalysisResults = new Map<string, TxtAnalysisResult>()
-  let primaryErrorCategory: ErrorCategory | undefined = undefined
-  let primaryErrorMessage: string | undefined = undefined
-  let hasActiveUsageIndicators = false
-
-  const processedProviders = new Set<string>()
   const nsResponses = new Map<string, string[]>()
 
-  const primaryProviderResults = providerResults.filter(r => primaryProviderNames.includes(r.provider));
+  let primaryErrorCategory: ErrorCategory | undefined = undefined
+  let primaryErrorMessage: string | undefined = undefined
+  let dnssecValidated = false
+  let parkedNsCount = 0
+  let parkedTxtConsensusCount = 0
+  let premiumTxtConsensusCount = 0
+  let hasActiveUsageIndicators = false
+  let totalNxDomainResponses = 0
+  let totalServFailResponses = 0
+  let totalNoErrorWithExactRecords = 0
+  let totalNoErrorWithoutExactRecords = 0
+  let totalNetworkOrTimeoutErrors = 0
+  let totalOtherDnsErrors = 0
+  const uniqueMatchedTxtPatterns = new Set<string>()
+  const uniquePremiumTxtPatterns = new Set<string>()
 
   providerResults.forEach(result => {
-    processedProviders.add(result.provider)
-    const queryTypeText = result.queryType === DNS_RECORD_TYPE_NS ? 'NS' : (result.queryType === DNS_RECORD_TYPE_SOA ? 'SOA' : 'TXT');
-    const isPrimaryProvider = primaryProviderNames.includes(result.provider);
+    const evidence = getEvidence(providerEvidence, result.provider)
+    const queryTypeLabel = recordTypeText(result.queryType)
+    const isPrimaryProvider = primaryProviderNames.includes(result.provider)
+    evidence.queryCount++
 
     if (result.status === 'fulfilled') {
       const data = result.value
       const statusText = DNS_STATUS_MESSAGES[data.Status] || `Unknown Status ${data.Status}`
-      reasons.push(`Provider ${result.provider}${isPrimaryProvider ? ' (Primary)' : ''} (${queryTypeText}): ${statusText}${data.Comment ? ` (${data.Comment})` : ''}`)
+      reasons.push(`Provider ${result.provider}${isPrimaryProvider ? ' (Primary)' : ''} (${queryTypeLabel}): ${statusText}${data.Comment ? ` (${data.Comment})` : ''}`)
+
+      if (data.AD) {
+        evidence.dnssecValidated = true
+        dnssecValidated = true
+        reasons.push(' -> DNSSEC validated (AD flag).')
+      }
 
       if (data.Status === DNS_STATUS_NXDOMAIN) {
-        nxDomainCount++
-      } else if (data.Status === DNS_STATUS_NOERROR) {
-        const hasNsOrSoaRecords =
-          (data.Answer?.some(r => r.type === DNS_RECORD_TYPE_NS || r.type === DNS_RECORD_TYPE_SOA)) ||
-          (data.Authority?.some(r => r.type === DNS_RECORD_TYPE_NS || r.type === DNS_RECORD_TYPE_SOA))
+        evidence.nxDomainCount++
+        totalNxDomainResponses++
+        return
+      }
 
-        if (hasNsOrSoaRecords) {
-          noErrorWithRecordsCount++
-          reasons.push(` -> Found NS/SOA records.`)
-        } else {
-          noErrorWithoutRecordsCount++
-          reasons.push(` -> No confirming NS/SOA records found despite NOERROR.`)
-        }
-
-        if (result.queryType === DNS_RECORD_TYPE_NS && data.Answer) {
-          const currentNsList: string[] = []
-          let providerReportsParkedNs = false;
-          data.Answer.forEach(record => {
-            if (record.type === DNS_RECORD_TYPE_NS && typeof record.data === 'string') {
-              const nameserver = record.data.toLowerCase().replace(/\.$/, '');
-              currentNsList.push(nameserver);
-              if (PARKING_NAMESERVERS.has(nameserver)) {
-                providerReportsParkedNs = true;
-                reasons.push(` -> Found parking nameserver: ${record.data}`);
-              }
-            }
-          });
-          nsResponses.set(result.provider, currentNsList);
-          if (providerReportsParkedNs) {
-            parkedNsCount++;
-          }
-        }
-
-        if (result.queryType === DNS_RECORD_TYPE_TXT) {
-          const analysis = analyzeTxtRecordsForParking(data);
-          txtAnalysisResults.set(result.provider, analysis);
-          if (analysis.matchedPatterns.length > 0) {
-            reasons.push(` -> Found patterns: [${analysis.matchedPatterns.join(', ')}] (Confidence: ${analysis.confidence})`);
-          }
-          if (analysis.hasActiveUsageIndicators) {
-            hasActiveUsageIndicators = true;
-            reasons.push(` -> Found active domain usage indicators (verifications)`);
-          }
-        }
-
-      } else if (data.Status === DNS_STATUS_SERVFAIL) {
-        servFailCount++
+      if (data.Status === DNS_STATUS_SERVFAIL) {
+        evidence.servFailCount++
+        totalServFailResponses++
         if (!primaryErrorCategory) {
           primaryErrorCategory = ErrorCategory.DNS_ERROR
           primaryErrorMessage = `DNS server failure (SERVFAIL) reported by ${result.provider}`
         }
-      } else {
-        otherDnsErrorCount++
+        return
+      }
+
+      if (data.Status !== DNS_STATUS_NOERROR) {
+        evidence.otherDnsErrorCount++
+        totalOtherDnsErrors++
         reasons.push(` -> DNS error code ${data.Status}.`)
         if (!primaryErrorCategory) {
           primaryErrorCategory = ErrorCategory.DNS_ERROR
-          primaryErrorMessage = `DNS error ${DNS_STATUS_MESSAGES[data.Status]} reported by ${result.provider}`
+          primaryErrorMessage = `DNS error ${DNS_STATUS_MESSAGES[data.Status] || data.Status} reported by ${result.provider}`
+        }
+        return
+      }
+
+      evidence.noErrorCount++
+      const hasAnyExactAnswer = hasExactAnswer(data, domain)
+      const hasExactNsOrSoaAnswer = hasExactAnswer(data, domain, [DNS_RECORD_TYPE_NS, DNS_RECORD_TYPE_SOA])
+
+      if (hasAnyExactAnswer) {
+        evidence.exactAnswerCount++
+        evidence.hasPositiveExistenceSignal = true
+        totalNoErrorWithExactRecords++
+        reasons.push(' -> Found exact DNS answer for this domain.')
+      } else {
+        evidence.noErrorWithoutExactAnswersCount++
+        totalNoErrorWithoutExactRecords++
+        reasons.push(' -> NOERROR without exact answers; treating as weak/inconclusive evidence.')
+      }
+
+      if (hasExactNsOrSoaAnswer) {
+        evidence.exactNsOrSoaAnswerCount++
+        reasons.push(' -> Found exact NS/SOA delegation or zone-apex evidence.')
+      }
+
+      if (result.queryType === DNS_RECORD_TYPE_NS && data.Answer) {
+        const currentNsList: string[] = []
+        data.Answer.forEach(record => {
+          if (record.type !== DNS_RECORD_TYPE_NS || typeof record.data !== 'string') return
+          if (normalizeDnsName(record.name) !== normalizeDnsName(domain)) return
+
+          const nameserver = normalizeDnsName(record.data)
+          currentNsList.push(nameserver)
+          if (PARKING_NAMESERVERS.has(nameserver)) {
+            evidence.parkedByNs = true
+            reasons.push(` -> Found parking nameserver: ${record.data}`)
+          }
+        })
+        nsResponses.set(result.provider, currentNsList)
+      }
+
+      if (result.queryType === DNS_RECORD_TYPE_TXT) {
+        const txtAnalysis = analyzeTxtRecordsForParking(data)
+        evidence.txtAnalysis = txtAnalysis
+        txtAnalysisResults.set(result.provider, txtAnalysis)
+
+        txtAnalysis.matchedPatterns.forEach(pattern => uniqueMatchedTxtPatterns.add(pattern))
+        if (txtAnalysis.matchedPatterns.length > 0) {
+          reasons.push(` -> Found TXT patterns: [${txtAnalysis.matchedPatterns.join(', ')}] (Confidence: ${txtAnalysis.confidence})`)
+        }
+        if (txtAnalysis.hasActiveUsageIndicators) {
+          evidence.hasActiveUsageIndicators = true
+          hasActiveUsageIndicators = true
+          evidence.hasPositiveExistenceSignal = true
+          reasons.push(' -> Found active domain usage indicators.')
+        }
+        if (txtAnalysis.isPremium) {
+          evidence.hasPremiumSignal = true
+          txtAnalysis.matchedPatterns
+            .filter(pattern => /premium|sale|broker|purchase|reserved/i.test(pattern))
+            .forEach(pattern => uniquePremiumTxtPatterns.add(pattern))
+        }
+        if (txtAnalysis.isParked || txtAnalysis.isPremium) {
+          evidence.hasPositiveExistenceSignal = true
         }
       }
 
-      if (data.AD) {
-        dnssecValidated = true
-        reasons.push(` -> DNSSEC validated (AD flag).`)
-      }
-    } else { // status === 'rejected'
-      const category = result.errorCategory || ErrorCategory.UNKNOWN
-      const message = result.errorMessage || 'Unknown error'
-      reasons.push(`Provider ${result.provider}${isPrimaryProvider ? ' (Primary)' : ''} (${queryTypeText}): Error - ${message}`)
+      return
+    }
 
-      if (category === ErrorCategory.NETWORK || category === ErrorCategory.TIMEOUT) {
-        networkOrTimeoutErrorCount++
-      } else {
-        otherDnsErrorCount++
-      }
+    const category = result.errorCategory || ErrorCategory.UNKNOWN
+    const message = result.errorMessage || 'Unknown error'
+    reasons.push(`Provider ${result.provider}${isPrimaryProvider ? ' (Primary)' : ''} (${queryTypeLabel}): Error - ${message}`)
 
-      if (!primaryErrorCategory) {
-        primaryErrorCategory = category
-        primaryErrorMessage = message
-      }
+    if (category === ErrorCategory.NETWORK || category === ErrorCategory.TIMEOUT) {
+      evidence.networkOrTimeoutErrorCount++
+      totalNetworkOrTimeoutErrors++
+    } else {
+      evidence.otherDnsErrorCount++
+      totalOtherDnsErrors++
+    }
 
-      if (result.suggestsDomainExists) {
-        reasons.push(` -> This error type sometimes occurs with registered domains.`)
-      }
+    if (result.suggestsDomainExists) {
+      evidence.suggestiveErrorCount++
+      reasons.push(' -> This error type sometimes occurs with registered or DNSSEC-broken domains.')
+    }
+
+    if (!primaryErrorCategory) {
+      primaryErrorCategory = category
+      primaryErrorMessage = message
     }
   })
 
-  const totalResponses = providerResults.length
-  const distinctProviderResponses = processedProviders.size
-  const consensusThreshold = Math.max(1, Math.ceil(distinctProviderResponses / 2));
+  providerEvidence.forEach(evidence => {
+    if (evidence.parkedByNs) parkedNsCount++
+    if (evidence.txtAnalysis?.isParked) parkedTxtConsensusCount++
+    if (evidence.txtAnalysis?.isPremium) premiumTxtConsensusCount++
 
-  const primaryProviderCount = primaryProviderNames.length;
-  const primaryProviderResponses = primaryProviderResults.length;
-  const primaryNxDomainCount = primaryProviderResults.filter(r =>
-    r.status === 'fulfilled' && r.value.Status === DNS_STATUS_NXDOMAIN
-  ).length;
-  const primaryNoErrorWithRecordsCount = primaryProviderResults.filter(r =>
-    r.status === 'fulfilled' &&
-    r.value.Status === DNS_STATUS_NOERROR &&
-    (r.value.Answer?.some(rec => rec.type === DNS_RECORD_TYPE_NS || rec.type === DNS_RECORD_TYPE_SOA) ||
-    r.value.Authority?.some(rec => rec.type === DNS_RECORD_TYPE_NS || rec.type === DNS_RECORD_TYPE_SOA))
-  ).length;
-  const primaryNxDomainConsensus = primaryNxDomainCount === primaryProviderCount && primaryProviderCount > 1;
-  const anyPrimaryNoErrorWithRecords = primaryNoErrorWithRecordsCount > 0;
+    const hasPositiveSignal =
+      evidence.hasPositiveExistenceSignal ||
+      evidence.exactNsOrSoaAnswerCount > 0 ||
+      evidence.exactAnswerCount > 0 ||
+      evidence.parkedByNs ||
+      Boolean(evidence.txtAnalysis?.isParked) ||
+      Boolean(evidence.txtAnalysis?.isPremium) ||
+      evidence.hasActiveUsageIndicators
 
-  let parkedTxtConsensusCount = 0;
-  let uniqueMatchedTxtPatterns = new Set<string>();
-  txtAnalysisResults.forEach(analysis => {
-    if (analysis.isParked) parkedTxtConsensusCount++;
-    analysis.matchedPatterns.forEach((p: string) => uniqueMatchedTxtPatterns.add(p));
-  });
-
-  let premiumTxtConsensusCount = 0;
-  let uniquePremiumTxtPatterns = new Set<string>();
-  txtAnalysisResults.forEach(analysis => {
-    if (analysis.isPremium) {
-      premiumTxtConsensusCount++;
-      analysis.matchedPatterns.filter((p: string) =>
-        p.toLowerCase().includes('premium') ||
-        p.toLowerCase().includes('sale') ||
-        p.toLowerCase().includes('broker')
-      ).forEach((p: string) => uniquePremiumTxtPatterns.add(p));
+    if (hasPositiveSignal) {
+      evidence.vote = 'registered'
+      return
     }
-  });
 
-  const hasPremiumTxtSignalConsensus = premiumTxtConsensusCount >= consensusThreshold && premiumTxtConsensusCount > 0;
+    if (evidence.nxDomainCount > 0 && evidence.servFailCount === 0 && evidence.suggestiveErrorCount === 0) {
+      evidence.vote = 'available'
+      evidence.partialAvailabilitySignal = evidence.networkOrTimeoutErrorCount > 0 || evidence.otherDnsErrorCount > 0
+      return
+    }
+
+    evidence.vote = 'indeterminate'
+  })
+
+  const evidences = Array.from(providerEvidence.values())
+  const distinctProviderResponses = evidences.length
+  const consensusThreshold = Math.max(1, Math.ceil(distinctProviderResponses / 2))
+  const strictAvailabilityThreshold = distinctProviderResponses >= 2 ? 2 : 1
+  const availableProviderVotes = evidences.filter(evidence => evidence.vote === 'available').length
+  const registeredProviderVotes = evidences.filter(evidence => evidence.vote === 'registered').length
+  const indeterminateProviderVotes = evidences.filter(evidence => evidence.vote === 'indeterminate').length
+  const partialAvailabilityVotes = evidences.filter(evidence => evidence.vote === 'available' && evidence.partialAvailabilitySignal).length
+  const primaryProviderResults = evidences.filter(evidence => primaryProviderNames.includes(evidence.provider))
+  const primaryAvailableVotes = primaryProviderResults.filter(evidence => evidence.vote === 'available').length
+  const primaryRegisteredVotes = primaryProviderResults.filter(evidence => evidence.vote === 'registered').length
+  const hasPremiumTxtSignalConsensus = premiumTxtConsensusCount >= consensusThreshold && premiumTxtConsensusCount > 0
   const hasStrongParkingSignal =
     parkedNsCount >= consensusThreshold ||
-    parkedTxtConsensusCount >= consensusThreshold ||
-    (isWildcard && (parkedNsCount > 0 || parkedTxtConsensusCount > 0));
+    parkedTxtConsensusCount >= consensusThreshold
 
   return {
-    nxDomainCount,
-    noErrorWithRecordsCount,
-    noErrorWithoutRecordsCount,
-    servFailCount,
-    otherDnsErrorCount,
-    networkOrTimeoutErrorCount,
+    providerEvidence,
+    nxDomainCount: totalNxDomainResponses,
+    noErrorWithRecordsCount: totalNoErrorWithExactRecords,
+    noErrorWithoutRecordsCount: totalNoErrorWithoutExactRecords,
+    servFailCount: totalServFailResponses,
+    otherDnsErrorCount: totalOtherDnsErrors,
+    networkOrTimeoutErrorCount: totalNetworkOrTimeoutErrors,
     dnssecValidated,
     parkedNsCount,
     txtAnalysisResults,
     primaryErrorCategory,
     primaryErrorMessage,
     hasActiveUsageIndicators,
-    processedProviders,
+    processedProviders: new Set(evidences.map(evidence => evidence.provider)),
     nsResponses,
     primaryProviderResults,
-    totalResponses,
+    totalResponses: providerResults.length,
     distinctProviderResponses,
     consensusThreshold,
-    primaryProviderCount,
-    primaryProviderResponses,
-    primaryNxDomainCount,
-    primaryNoErrorWithRecordsCount,
-    primaryNxDomainConsensus,
-    anyPrimaryNoErrorWithRecords,
+    strictAvailabilityThreshold,
+    availableProviderVotes,
+    registeredProviderVotes,
+    indeterminateProviderVotes,
+    partialAvailabilityVotes,
+    primaryProviderCount: primaryProviderNames.length,
+    primaryProviderResponses: primaryProviderResults.length,
+    primaryAvailableVotes,
+    primaryRegisteredVotes,
+    primaryNxDomainCount: primaryProviderResults.reduce((sum, evidence) => sum + evidence.nxDomainCount, 0),
+    primaryNoErrorWithRecordsCount: primaryProviderResults.reduce((sum, evidence) => sum + evidence.exactNsOrSoaAnswerCount, 0),
+    primaryNxDomainConsensus: primaryProviderResults.length > 0 && primaryProviderResults.every(evidence => evidence.vote === 'available'),
+    anyPrimaryNoErrorWithRecords: primaryProviderResults.some(evidence => evidence.exactNsOrSoaAnswerCount > 0),
     parkedTxtConsensusCount,
     uniqueMatchedTxtPatterns,
     premiumTxtConsensusCount,
     uniquePremiumTxtPatterns,
     hasPremiumTxtSignalConsensus,
     hasStrongParkingSignal
-  };
+  }
 }
 
 /**
- * Calculate availability score based on various signals
+ * Calculate availability score based on provider votes, not raw query count.
  */
-function calculateAvailabilityScore(analysis: ReturnType<typeof analyzeProviderResponses>, isWildcard: boolean): number {
-  let score = 0;
-  
-  // NXDOMAIN responses are strong indicators of availability
-  score += analysis.nxDomainCount * 15;
-  
-  // Primary provider NXDOMAIN carries more weight
-  score += analysis.primaryNxDomainCount * 10;
-  
-  // If all providers return NXDOMAIN, that's a strong signal
-  if (analysis.nxDomainCount === analysis.distinctProviderResponses && analysis.distinctProviderResponses > 1) {
-    score += 20;
+function calculateAvailabilityScore(
+  analysis: ReturnType<typeof analyzeProviderResponses>,
+  isWildcard: boolean,
+  isKnownWildcardTld: boolean,
+  totalErrorsSuggestingDomainExists: number
+): number {
+  let score = 0
+
+  score += analysis.availableProviderVotes * 30
+  score += analysis.primaryAvailableVotes * 10
+
+  if (analysis.availableProviderVotes >= analysis.strictAvailabilityThreshold && analysis.distinctProviderResponses > 1) {
+    score += 15
   }
-  
-  // NOERROR with records is a negative signal for availability
-  score -= analysis.noErrorWithRecordsCount * 25;
-  
-  // Parking signals reduce availability likelihood
-  score -= analysis.parkedNsCount * 15;
-  score -= analysis.parkedTxtConsensusCount * 10;
-  
-  // Active usage indicators strongly suggest domain is not available
-  if (analysis.hasActiveUsageIndicators) {
-    score -= 50;
-  }
-  
-  // Wildcard TLDs make availability harder to determine
-  if (isWildcard) {
-    score -= 15;
-  }
-  
-  // Premium signals reduce availability likelihood
-  score -= analysis.premiumTxtConsensusCount * 15;
-  
-  return score;
+
+  score -= analysis.registeredProviderVotes * 45
+  score -= analysis.indeterminateProviderVotes * 8
+  score -= analysis.partialAvailabilityVotes * 8
+  score -= analysis.parkedNsCount * 20
+  score -= analysis.parkedTxtConsensusCount * 15
+  score -= analysis.premiumTxtConsensusCount * 20
+  score -= totalErrorsSuggestingDomainExists * 12
+
+  if (analysis.hasActiveUsageIndicators) score -= 60
+  if (isWildcard) score -= 35
+  if (isKnownWildcardTld) score -= 15
+
+  return score
 }
 
 /**
- * Calculate registration score based on various signals
+ * Calculate registration score based on provider votes, not raw query count.
  */
-function calculateRegistrationScore(analysis: ReturnType<typeof analyzeProviderResponses>, isWildcard: boolean): number {
-  let score = 0;
-  
-  // NOERROR with NS/SOA records is a strong indicator of registration
-  score += analysis.noErrorWithRecordsCount * 20;
-  
-  // Primary provider NOERROR with records carries more weight
-  score += analysis.primaryNoErrorWithRecordsCount * 15;
-  
-  // SERVFAIL often indicates registration with DNSSEC issues
-  score += analysis.servFailCount * 10;
-  
-  // Parking signals strongly suggest registration
-  score += analysis.parkedNsCount * 15;
-  score += analysis.parkedTxtConsensusCount * 10;
-  
-  // Active usage indicators strongly suggest domain is registered
-  if (analysis.hasActiveUsageIndicators) {
-    score += 50;
-  }
-  
-  // Premium signals suggest the domain may be registered and for sale
-  score += analysis.premiumTxtConsensusCount * 15;
-  
-  // NXDOMAIN responses reduce registration likelihood
-  score -= analysis.nxDomainCount * 10;
-  
-  return score;
+function calculateRegistrationScore(
+  analysis: ReturnType<typeof analyzeProviderResponses>,
+  isWildcard: boolean,
+  totalErrorsSuggestingDomainExists: number
+): number {
+  let score = 0
+
+  score += analysis.registeredProviderVotes * 35
+  score += analysis.primaryRegisteredVotes * 15
+  score += analysis.servFailCount * 10
+  score += analysis.parkedNsCount * 20
+  score += analysis.parkedTxtConsensusCount * 15
+  score += analysis.premiumTxtConsensusCount * 20
+  score += totalErrorsSuggestingDomainExists * 10
+
+  if (analysis.hasActiveUsageIndicators) score += 60
+  if (isWildcard) score += 20
+
+  score -= analysis.availableProviderVotes * 15
+
+  return score
 }
 
 /**
- * Determine final status and confidence score based on availability and registration scores
+ * Determine final status and confidence score based on provider-level evidence.
  */
 function determineFinalStatusAndScore(
-  availabilityScore: number, 
-  registrationScore: number, 
-  analysis: ReturnType<typeof analyzeProviderResponses>, 
+  availabilityScore: number,
+  registrationScore: number,
+  analysis: ReturnType<typeof analyzeProviderResponses>,
   isWildcard: boolean,
+  isKnownWildcardTld: boolean,
+  totalErrorsSuggestingDomainExists: number,
   reasons: string[]
 ): { finalStatus: DomainAvailabilityStatus, confidenceScore: number } {
-  let finalStatus = DomainAvailabilityStatus.INDETERMINATE;
-  let confidenceScore = 0;
-  
-  if (availabilityScore > 50 && registrationScore < 20) {
-    // Strong availability signals with minimal registration signals
-    finalStatus = DomainAvailabilityStatus.PENDING_CONFIRMATION; // Changed from AVAILABLE to PENDING_CONFIRMATION
-    confidenceScore = Math.min(90, availabilityScore - registrationScore);
-    reasons.push(`Availability score: ${availabilityScore}, Registration score: ${registrationScore}`);
-    reasons.push("Initial check suggests availability. Pending confirmation.");
-  } else if (registrationScore > 50 && availabilityScore < 20) {
-    // Strong registration signals with minimal availability signals
-    finalStatus = DomainAvailabilityStatus.REGISTERED;
-    confidenceScore = Math.min(95, registrationScore - availabilityScore);
-    reasons.push(`Availability score: ${availabilityScore}, Registration score: ${registrationScore}`);
-    reasons.push("High confidence: Strong registration signals detected.");
-  } else if (registrationScore > 40 && analysis.hasPremiumTxtSignalConsensus) {
-    // Premium signals with moderate registration score
-    finalStatus = DomainAvailabilityStatus.PREMIUM;
-    confidenceScore = Math.min(85, registrationScore - availabilityScore/2);
-    reasons.push(`Availability score: ${availabilityScore}, Registration score: ${registrationScore}, Premium signals: ${analysis.premiumTxtConsensusCount}`);
-    reasons.push(`Premium status detected based on TXT records. Matched patterns: [${Array.from(analysis.uniquePremiumTxtPatterns).join(', ')}]`);
+  let finalStatus = DomainAvailabilityStatus.INDETERMINATE
+  let confidenceScore = 0
+
+  const hasBlockingAvailabilityRisk =
+    isWildcard ||
+    totalErrorsSuggestingDomainExists > 0 ||
+    analysis.registeredProviderVotes > 0
+
+  if (analysis.hasPremiumTxtSignalConsensus || (analysis.premiumTxtConsensusCount > 0 && registrationScore >= 35)) {
+    finalStatus = DomainAvailabilityStatus.PREMIUM
+    confidenceScore = Math.min(90, Math.max(55, registrationScore - availabilityScore / 2))
+    reasons.push(`Availability score: ${availabilityScore}, Registration score: ${registrationScore}, Premium signals: ${analysis.premiumTxtConsensusCount}`)
+    reasons.push(`Premium status detected based on DNS evidence. Matched patterns: [${Array.from(analysis.uniquePremiumTxtPatterns).join(', ')}]`)
+  } else if (analysis.registeredProviderVotes > 0 && registrationScore >= 35) {
+    finalStatus = DomainAvailabilityStatus.REGISTERED
+    confidenceScore = Math.min(95, Math.max(60, registrationScore - availabilityScore))
+    reasons.push(`Availability score: ${availabilityScore}, Registration score: ${registrationScore}`)
+    reasons.push(`High confidence: ${analysis.registeredProviderVotes}/${analysis.distinctProviderResponses} resolver(s) reported positive existence evidence.`)
+  } else if (
+    analysis.availableProviderVotes >= analysis.strictAvailabilityThreshold &&
+    availabilityScore > 45 &&
+    registrationScore < 25 &&
+    !hasBlockingAvailabilityRisk
+  ) {
+    finalStatus = DomainAvailabilityStatus.PENDING_CONFIRMATION
+    confidenceScore = Math.min(90, Math.max(55, availabilityScore - registrationScore))
+    reasons.push(`Availability score: ${availabilityScore}, Registration score: ${registrationScore}`)
+    reasons.push(`Initial private DNS check suggests availability from ${analysis.availableProviderVotes}/${analysis.distinctProviderResponses} resolver(s). Pending confirmation.`)
   } else {
-    // Conflicting or insufficient signals
-    finalStatus = DomainAvailabilityStatus.INDETERMINATE;
-    confidenceScore = Math.max(10, 50 - Math.abs(availabilityScore - registrationScore));
-    reasons.push(`Availability score: ${availabilityScore}, Registration score: ${registrationScore}`);
-    reasons.push("Low confidence: Mixed or insufficient signals for definitive status.");
+    finalStatus = DomainAvailabilityStatus.INDETERMINATE
+    confidenceScore = Math.max(10, Math.min(65, 50 - Math.abs(availabilityScore - registrationScore) + analysis.availableProviderVotes * 5))
+    reasons.push(`Availability score: ${availabilityScore}, Registration score: ${registrationScore}`)
+    if (isWildcard) {
+      reasons.push('Low confidence: wildcard DNS makes private DNS availability inference unsafe.')
+    } else if (isKnownWildcardTld) {
+      reasons.push('Low confidence: this TLD is known to produce wildcard or registry-level edge cases.')
+    } else {
+      reasons.push('Low confidence: mixed or insufficient private DNS signals for a definitive status.')
+    }
   }
-  
-  return { finalStatus, confidenceScore };
+
+  return { finalStatus, confidenceScore }
 }
 
 /**
- * Interprets the combined results of DNS queries to determine domain availability
+ * Interprets the combined results of DNS queries to determine domain availability.
  */
 export const interpretCombinedResults = (
   domain: string,
-  providerResults: Array<
-    { status: 'fulfilled', value: DnsResponse, provider: string, queryType: number } |
-    { status: 'rejected', reason: Error, provider: string, queryType: number, errorCategory?: ErrorCategory, errorMessage?: string, suggestsDomainExists?: boolean }
-  >,
+  providerResults: ProviderResult[],
   isWildcard: boolean,
   isKnownWildcardTld: boolean,
   totalErrorsSuggestingDomainExists: number,
   initialReasons: string[],
   primaryProviderNames: string[]
 ): DomainResult => {
-  const reasons = [...initialReasons];
-  
-  // Analyze the raw provider responses
-  const analysis = analyzeProviderResponses(providerResults, primaryProviderNames, reasons, isWildcard);
-  
-  // Calculate scores for availability and registration
-  const availabilityScore = calculateAvailabilityScore(analysis, isWildcard);
-  const registrationScore = calculateRegistrationScore(analysis, isWildcard);
-  
-  // Determine final status and confidence score
-  const { finalStatus, confidenceScore } = determineFinalStatusAndScore(
-    availabilityScore, 
-    registrationScore, 
-    analysis, 
+  const reasons = [...initialReasons]
+
+  const analysis = analyzeProviderResponses(domain, providerResults, primaryProviderNames, reasons)
+
+  const availabilityScore = calculateAvailabilityScore(
+    analysis,
     isWildcard,
+    isKnownWildcardTld,
+    totalErrorsSuggestingDomainExists
+  )
+  const registrationScore = calculateRegistrationScore(
+    analysis,
+    isWildcard,
+    totalErrorsSuggestingDomainExists
+  )
+
+  const { finalStatus, confidenceScore } = determineFinalStatusAndScore(
+    availabilityScore,
+    registrationScore,
+    analysis,
+    isWildcard,
+    isKnownWildcardTld,
+    totalErrorsSuggestingDomainExists,
     reasons
-  );
-  
+  )
+
   return {
     domain,
     status: finalStatus,
@@ -384,5 +512,5 @@ export const interpretCombinedResults = (
     wildcardDetected: isWildcard,
     isParkedByNs: analysis.parkedNsCount > 0,
     isParkedByTxt: analysis.parkedTxtConsensusCount > 0
-  };
-} 
+  }
+}

@@ -6,6 +6,7 @@
     "build": "nuxt build",
     "dev": "nuxt dev",
     "generate": "nuxt generate",
+    "test": "node --experimental-transform-types --import ./tests/register-loader.mjs --test tests/domain-interpretation.test.ts tests/domain-checker.test.ts",
     "preview": "npm run build && wrangler dev",
     "postinstall": "nuxt prepare",
     "deploy": "npm run build && wrangler deploy", 

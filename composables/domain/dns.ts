@@ -4,8 +4,7 @@ import {
   TIMEOUT_MS, 
   MAX_RETRIES, 
   INITIAL_RETRY_DELAY_MS,
-  MAX_RETRY_DELAY_MS,
-  getProviderConfigFromUrl 
+  MAX_RETRY_DELAY_MS
 } from '~/config/appConfig'
 import { 
   DNS_STATUS_MESSAGES, 
@@ -25,6 +24,42 @@ export interface DohProvider {
   headers?: Record<string, string>;
 }
 
+export interface FetchDnsJsonOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  maxRetries?: number;
+  initialRetryDelayMs?: number;
+  maxRetryDelayMs?: number;
+}
+
+interface ResolvedFetchDnsJsonOptions {
+  signal?: AbortSignal;
+  timeoutMs: number;
+  maxRetries: number;
+  initialRetryDelayMs: number;
+  maxRetryDelayMs: number;
+}
+
+const resolveFetchOptions = (signalOrOptions?: AbortSignal | FetchDnsJsonOptions): ResolvedFetchDnsJsonOptions => {
+  if (signalOrOptions && 'aborted' in signalOrOptions) {
+    return {
+      signal: signalOrOptions,
+      timeoutMs: TIMEOUT_MS,
+      maxRetries: MAX_RETRIES,
+      initialRetryDelayMs: INITIAL_RETRY_DELAY_MS,
+      maxRetryDelayMs: MAX_RETRY_DELAY_MS,
+    }
+  }
+
+  return {
+    signal: signalOrOptions?.signal,
+    timeoutMs: signalOrOptions?.timeoutMs ?? TIMEOUT_MS,
+    maxRetries: signalOrOptions?.maxRetries ?? MAX_RETRIES,
+    initialRetryDelayMs: signalOrOptions?.initialRetryDelayMs ?? INITIAL_RETRY_DELAY_MS,
+    maxRetryDelayMs: signalOrOptions?.maxRetryDelayMs ?? MAX_RETRY_DELAY_MS,
+  }
+}
+
 // Centralized error handler
 export const handleError = (context: string, error: Error, domain?: string): {
     category: ErrorCategory,
@@ -36,22 +71,23 @@ export const handleError = (context: string, error: Error, domain?: string): {
     let suggestsDomainExists = false
 
     // Basic Error Classification
-    if (error.name === 'AbortError' || error.message.toLowerCase().includes('timeout')) {
+    const lowerMessage = error.message.toLowerCase()
+    if (error.name === 'AbortError' || lowerMessage.includes('timeout') || lowerMessage.includes('timed out')) {
       category = ErrorCategory.TIMEOUT
       message = 'DNS request timed out'
-      suggestsDomainExists = true
+      suggestsDomainExists = false
     } else if (error instanceof TypeError && (error.message.includes('NetworkError') || error.message.includes('fetch'))) {
       category = ErrorCategory.NETWORK
       message = 'Network connection issue'
       suggestsDomainExists = false
-    } else if (error.message.includes('status')) { // Likely an HTTP error from fetch
+    } else if (lowerMessage.includes('status') || lowerMessage.includes('http error')) { // Likely an HTTP error from fetch
       category = ErrorCategory.DNS_ERROR
-      const statusMatch = error.message.match(/status (\d+)/)
+      const statusMatch = error.message.match(/(?:status|http error:)\s*(\d+)/i)
       const httpStatus = statusMatch ? parseInt(statusMatch[1], 10) : null
 
       if (httpStatus && [500, 502, 503, 504].includes(httpStatus)) {
         message = `DoH provider server error (${httpStatus})`
-        suggestsDomainExists = true
+        suggestsDomainExists = false
       } else if (httpStatus) {
         message = `DoH query failed with HTTP ${httpStatus}`
         suggestsDomainExists = false
@@ -77,10 +113,17 @@ export const fetchDnsJson = async (
   provider: DohProvider,
   domain: string, 
   recordType: number,
-  signal?: AbortSignal
+  signalOrOptions?: AbortSignal | FetchDnsJsonOptions
 ): Promise<DoHJsonResponse> => {
     let attempts = 0;
     let lastError: Error | null = null;
+    const {
+      signal,
+      timeoutMs,
+      maxRetries,
+      initialRetryDelayMs,
+      maxRetryDelayMs,
+    } = resolveFetchOptions(signalOrOptions);
     
     // Convert record type to string for logging
     let recordTypeStr: string;
@@ -92,7 +135,7 @@ export const fetchDnsJson = async (
       default: recordTypeStr = recordType.toString();
     }
 
-    while (attempts <= MAX_RETRIES) {
+    while (attempts <= maxRetries) {
       try {
         const resolver = new DohResolver(provider.baseUrl);
 
@@ -102,7 +145,7 @@ export const fetchDnsJson = async (
           recordType,
           'GET',
           provider.headers,
-          TIMEOUT_MS,
+          timeoutMs,
           signal
         ) as DoHJsonResponse;
 
@@ -135,20 +178,20 @@ export const fetchDnsJson = async (
           category === ErrorCategory.NETWORK ||
           (category === ErrorCategory.DNS_ERROR && error.message.includes('status') && 
            /status (50[234])/.test(error.message))
-        ) && attempts <= MAX_RETRIES;
+        ) && attempts <= maxRetries;
 
         if (isRetryable) {
           // Implement exponential backoff with jitter
           const baseDelay = Math.min(
-            INITIAL_RETRY_DELAY_MS * Math.pow(2, attempts - 1), 
-            MAX_RETRY_DELAY_MS
+            initialRetryDelayMs * Math.pow(2, attempts - 1), 
+            maxRetryDelayMs
           );
           const jitter = baseDelay * 0.2 * (Math.random() - 0.5); // +/- 10% jitter
           const waitTime = Math.max(0, baseDelay + jitter);
 
           console.warn(
             `[DNS] Retrying query for ${domain} (${recordTypeStr}) with ${provider.name} ` +
-            `(Attempt ${attempts}/${MAX_RETRIES}) after ${category} error. ` +
+            `(Attempt ${attempts}/${maxRetries}) after ${category} error. ` +
             `Waiting ${waitTime.toFixed(0)}ms. Error: ${message}`
           );
           
@@ -172,14 +215,18 @@ export const fetchDnsJson = async (
 }
 
 // Check Wildcard DNS
-export const checkWildcardDNS = async (domain: string, provider: DohProvider): Promise<boolean> => {
+export const checkWildcardDNS = async (
+  domain: string,
+  provider: DohProvider,
+  options?: FetchDnsJsonOptions
+): Promise<boolean> => {
     const randomSubdomain = `check-${Math.random().toString(36).substring(2, 10)}-${Date.now().toString(36)}`
     const wildcardTestDomain = `${randomSubdomain}.${domain}`
 
     const providerName = provider.name ?? 'Unknown Provider'
 
     try {
-      const data = await fetchDnsJson(provider, wildcardTestDomain, DNS_RECORD_TYPE_A)
+      const data = await fetchDnsJson(provider, wildcardTestDomain, DNS_RECORD_TYPE_A, options)
       const hasResolvingAnswer = data.Answer?.some(r => [DNS_RECORD_TYPE_A, 5 /* CNAME */, 28 /* AAAA */].includes(r.type)) ?? false;
       const isWildcardDetected = data.Status === DNS_STATUS_NOERROR && hasResolvingAnswer;
 

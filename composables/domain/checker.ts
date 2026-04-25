@@ -1,12 +1,18 @@
 import { type DnsResponse } from '~/utils/DohResolver'
-import { KNOWN_WILDCARD_TLDS } from '~/config/appConfig'
+import {
+    CONFIRMATION_TIMEOUT_MS,
+    DNS_QUERY_RETRIES,
+    DNS_QUERY_TIMEOUT_MS,
+    KNOWN_WILDCARD_TLDS
+} from '~/config/appConfig'
 import { 
   DNS_RECORD_TYPE_NS, 
   DNS_RECORD_TYPE_SOA, 
   DNS_RECORD_TYPE_TXT,
   DNS_STATUS_NOERROR,
+  DNS_STATUS_NXDOMAIN,
+  DNS_STATUS_REFUSED,
   DNS_STATUS_SERVFAIL,
-  DOMAIN_CHECK_ERRORS_SUGGESTING_DOMAIN_EXISTS 
 } from './constants'
 import { 
   handleError, 
@@ -15,8 +21,10 @@ import {
   type DohProvider
 } from './dns'
 import { 
-  interpretCombinedResults 
+  hasExactAnswer,
+  interpretCombinedResults
 } from './analysis/interpretation'
+import { generateLink } from './utils'
 import { 
   type DomainResult,
   CheckStage,
@@ -29,32 +37,29 @@ import {
  * Performs a confirmation check for domains initially flagged as available
  * Uses different query approach to validate the initial finding
  */
+type ProviderQueryResult =
+    { status: 'fulfilled', value: DnsResponse, provider: string, queryType: number } |
+    { status: 'rejected', reason: Error, provider: string, queryType: number, errorCategory?: ErrorCategory, errorMessage?: string, suggestsDomainExists?: boolean }
+
 async function performConfirmationCheck(
     domain: string,
     providers: DohProvider[],
     abortSignal?: AbortSignal
-): Promise<{ 
-    status: 'fulfilled', 
-    value: DnsResponse, 
-    provider: string, 
-    queryType: number 
-}[] | { 
-    status: 'rejected', 
-    reason: Error, 
-    provider: string, 
-    queryType: number, 
-    errorCategory?: ErrorCategory, 
-    errorMessage?: string, 
-    suggestsDomainExists?: boolean 
-}[]> {
-    // Use a subset of providers, focusing on the reliable ones
-    const confirmationProviders = providers.slice(0, 2); // Use first two providers
+): Promise<ProviderQueryResult[]> {
+    // Confirm against every configured provider. This only runs for promising
+    // candidates, so the extra requests buy useful precision without slowing
+    // down obviously registered domains.
+    const confirmationProviders = providers;
     const queryPromises: Promise<any>[] = [];
     
     // Focus on SOA records for confirmation as they're definitive
     confirmationProviders.forEach(provider => {
         queryPromises.push(
-            fetchDnsJson(provider, domain, DNS_RECORD_TYPE_SOA, abortSignal)
+            fetchDnsJson(provider, domain, DNS_RECORD_TYPE_SOA, {
+                signal: abortSignal,
+                timeoutMs: CONFIRMATION_TIMEOUT_MS,
+                maxRetries: 0
+            })
                 .then(value => ({ status: 'fulfilled' as const, value, provider: provider.name, queryType: DNS_RECORD_TYPE_SOA }))
                 .catch(error => {
                     const { category, message, suggestsDomainExists } = handleError(
@@ -113,11 +118,14 @@ export default async function checkDomainAvailability(
     const startTime = performance.now()
     domain = domain.toLowerCase()
     const confidenceReasons: string[] = []
+    if (providers.length === 0) {
+        throw new Error('No DNS providers configured')
+    }
     
     // Extract TLD from domain for wildcard checks
     const domainSplit = domain.split('.')
     const tld = domainSplit.length > 1 ? domainSplit[domainSplit.length - 1] : null
-    const isKnownWildcardTld = tld ? KNOWN_WILDCARD_TLDS.has(tld) : false
+    const isKnownWildcardTld = tld ? (KNOWN_WILDCARD_TLDS.has(tld) || KNOWN_WILDCARD_TLDS.has(`.${tld}`)) : false
     
     if (isKnownWildcardTld) {
         confidenceReasons.push(`Note: TLD .${tld} is known to use wildcard DNS responses.`)
@@ -143,13 +151,27 @@ export default async function checkDomainAvailability(
         }
         
         updateProgressState(CheckStage.WILDCARD_CHECK, 5, `Checking for wildcard DNS on ${domain}...`)
+        const standardQueryOptions = {
+            signal: abortSignal,
+            timeoutMs: DNS_QUERY_TIMEOUT_MS,
+            maxRetries: DNS_QUERY_RETRIES
+        }
         
-        // Check for wildcard DNS - Fix: only pass the required two arguments
-        const wildcardCheckDomain = `wildcard-check-${Math.random().toString(36).substring(2)}.${domain}`
-        const isWildcard = await checkWildcardDNS(wildcardCheckDomain, providers[0])
+        // Check for wildcard DNS with up to two providers. A failed wildcard
+        // probe should reduce confidence, not fail the whole domain check.
+        const wildcardProviders = providers.slice(0, Math.min(2, providers.length))
+        const wildcardResults = await Promise.allSettled(
+            wildcardProviders.map(provider => checkWildcardDNS(domain, provider, standardQueryOptions))
+        )
+        const isWildcard = wildcardResults.some(result => result.status === 'fulfilled' && result.value)
+        const failedWildcardChecks = wildcardResults.filter(result => result.status === 'rejected').length
         
         if (isWildcard) {
-            confidenceReasons.push(`Wildcard DNS detected with random subdomain check to ${wildcardCheckDomain}.`)
+            confidenceReasons.push(`Wildcard DNS detected with random subdomain checks for ${domain}.`)
+        }
+
+        if (failedWildcardChecks > 0) {
+            confidenceReasons.push(`${failedWildcardChecks}/${wildcardResults.length} wildcard DNS probe(s) failed; continuing with lower confidence.`)
         }
         
         // Check if aborted after wildcard check
@@ -159,113 +181,60 @@ export default async function checkDomainAvailability(
         
         updateProgressState(CheckStage.PRIMARY_QUERY, 25, `Performing primary DNS queries for ${domain}...`)
         
-        // List of query promises to collect
-        const queryPromises: Promise<{
-            status: 'fulfilled',
-            value: DnsResponse,
-            provider: string,
-            queryType: number
-        } | {
-            status: 'rejected',
-            reason: Error,
-            provider: string,
-            queryType: number,
-            errorCategory?: ErrorCategory,
-            errorMessage?: string,
-            suggestsDomainExists?: boolean
-        }>[] = []
-        
         // Track errors that suggest domain might exist
         let totalErrorsSuggestingDomainExists = 0
         
-        // Run DNS queries across all providers and record types
+        // Run core DNS queries across all providers. TXT checks are deferred
+        // until positive DNS evidence exists, so availability candidates do not
+        // get stuck behind unnecessary provider calls.
         const primaryProviderNames = providers.slice(0, 1).map(p => p.name)
-        
+        const queryProvider = (
+            provider: DohProvider,
+            queryType: number,
+            recordTypeLabel: string,
+            suggestiveErrorWeight: number
+        ): Promise<ProviderQueryResult> => {
+            return fetchDnsJson(provider, domain, queryType, standardQueryOptions)
+                .then(value => ({ status: 'fulfilled' as const, value, provider: provider.name, queryType }))
+                .catch(error => {
+                    const { category, message, suggestsDomainExists } = handleError(
+                        `${recordTypeLabel} query from ${provider.name}`,
+                        error instanceof Error ? error : new Error(String(error)),
+                        domain
+                    )
+
+                    if (suggestsDomainExists) {
+                        totalErrorsSuggestingDomainExists += suggestiveErrorWeight
+                    }
+
+                    return {
+                        status: 'rejected' as const,
+                        reason: error instanceof Error ? error : new Error(String(error)),
+                        provider: provider.name,
+                        queryType,
+                        errorCategory: category,
+                        errorMessage: message,
+                        suggestsDomainExists
+                    }
+                })
+        }
+
+        const primaryQueryPromises: Promise<ProviderQueryResult>[] = []
+
         providers.forEach(provider => {
             const isPrimaryProvider = primaryProviderNames.includes(provider.name)
             
             // Query for NS records
-            queryPromises.push(
-                fetchDnsJson(provider, domain, DNS_RECORD_TYPE_NS, abortSignal)
-                    .then(value => ({ status: 'fulfilled' as const, value, provider: provider.name, queryType: DNS_RECORD_TYPE_NS }))
-                    .catch(error => {
-                        const { category, message, suggestsDomainExists } = handleError(
-                          `NS query from ${provider.name}`,
-                          error instanceof Error ? error : new Error(String(error)),
-                          domain
-                        )
-                        
-                        if (suggestsDomainExists) {
-                            totalErrorsSuggestingDomainExists += isPrimaryProvider ? 2 : 1
-                        }
-                        
-                        return {
-                            status: 'rejected' as const,
-                            reason: error instanceof Error ? error : new Error(String(error)),
-                            provider: provider.name,
-                            queryType: DNS_RECORD_TYPE_NS,
-                            errorCategory: category,
-                            errorMessage: message,
-                            suggestsDomainExists
-                        }
-                    })
+            primaryQueryPromises.push(
+                queryProvider(provider, DNS_RECORD_TYPE_NS, 'NS', isPrimaryProvider ? 2 : 1)
             )
             
             // Only query SOA for primary provider (to reduce load)
             if (isPrimaryProvider) {
-                queryPromises.push(
-                    fetchDnsJson(provider, domain, DNS_RECORD_TYPE_SOA, abortSignal)
-                        .then(value => ({ status: 'fulfilled' as const, value, provider: provider.name, queryType: DNS_RECORD_TYPE_SOA }))
-                        .catch(error => {
-                            const { category, message, suggestsDomainExists } = handleError(
-                              `SOA query from ${provider.name}`,
-                              error instanceof Error ? error : new Error(String(error)),
-                              domain
-                            )
-                            
-                            if (suggestsDomainExists) {
-                                totalErrorsSuggestingDomainExists += 2 // weight primary provider errors more
-                            }
-                            
-                            return {
-                                status: 'rejected' as const,
-                                reason: error instanceof Error ? error : new Error(String(error)),
-                                provider: provider.name,
-                                queryType: DNS_RECORD_TYPE_SOA,
-                                errorCategory: category,
-                                errorMessage: message,
-                                suggestsDomainExists
-                            }
-                        })
+                primaryQueryPromises.push(
+                    queryProvider(provider, DNS_RECORD_TYPE_SOA, 'SOA', 2)
                 )
             }
-            
-            // Query for TXT records (for parking detection)
-            queryPromises.push(
-                fetchDnsJson(provider, domain, DNS_RECORD_TYPE_TXT, abortSignal)
-                    .then(value => ({ status: 'fulfilled' as const, value, provider: provider.name, queryType: DNS_RECORD_TYPE_TXT }))
-                    .catch(error => {
-                        const { category, message, suggestsDomainExists } = handleError(
-                          `TXT query from ${provider.name}`,
-                          error instanceof Error ? error : new Error(String(error)),
-                          domain
-                        )
-                        
-                        if (suggestsDomainExists) {
-                            totalErrorsSuggestingDomainExists += isPrimaryProvider ? 2 : 1
-                        }
-                        
-                        return {
-                            status: 'rejected' as const,
-                            reason: error instanceof Error ? error : new Error(String(error)),
-                            provider: provider.name,
-                            queryType: DNS_RECORD_TYPE_TXT,
-                            errorCategory: category,
-                            errorMessage: message,
-                            suggestsDomainExists
-                        }
-                    })
-            )
         })
         
         // Check if aborted before analyzing
@@ -275,9 +244,9 @@ export default async function checkDomainAvailability(
         
         updateProgressState(CheckStage.ANALYZING, 50, `Analyzing DNS query results for ${domain}...`)
         
-        // Wait for all DNS queries to complete
-        const results = await Promise.allSettled(queryPromises)
-        const providerResults = results.map(result => {
+        // Wait for NS/SOA DNS queries to complete.
+        const primaryResults = await Promise.allSettled(primaryQueryPromises)
+        const providerResults = primaryResults.map(result => {
             if (result.status === 'fulfilled') {
                 return result.value
             } else {
@@ -293,6 +262,37 @@ export default async function checkDomainAvailability(
                 }
             }
         })
+
+        const hasPositiveDnsEvidence = providerResults.some(result =>
+            result.status === 'fulfilled' &&
+            result.value.Status === DNS_STATUS_NOERROR &&
+            hasExactAnswer(result.value, domain, [DNS_RECORD_TYPE_NS, DNS_RECORD_TYPE_SOA])
+        )
+
+        if (hasPositiveDnsEvidence) {
+            updateProgressState(CheckStage.PRIMARY_QUERY, 45, `Checking TXT signals for ${domain}...`)
+
+            const txtQueryPromises = providers.map(provider => {
+                const isPrimaryProvider = primaryProviderNames.includes(provider.name)
+                return queryProvider(provider, DNS_RECORD_TYPE_TXT, 'TXT', isPrimaryProvider ? 2 : 1)
+            })
+
+            const txtResults = await Promise.allSettled(txtQueryPromises)
+            providerResults.push(...txtResults.map(result => {
+                if (result.status === 'fulfilled') {
+                    return result.value
+                }
+
+                return {
+                    status: 'rejected' as const,
+                    reason: new Error('Unknown error in TXT Promise.allSettled'),
+                    provider: 'unknown',
+                    queryType: DNS_RECORD_TYPE_TXT,
+                    errorCategory: ErrorCategory.UNKNOWN,
+                    errorMessage: 'Unknown error in TXT Promise.allSettled'
+                }
+            }))
+        }
         
         // Check if aborted before finalizing
         if (abortSignal?.aborted) {
@@ -322,26 +322,38 @@ export default async function checkDomainAvailability(
                 // Run a focused confirmation check
                 const confirmationResults = await performConfirmationCheck(domain, providers, abortSignal);
                 
-                // We're now stricter in our interpretation - any sign of existence means it's not available
-                const anyRecordsFound = confirmationResults.some(result => 
-                    result.status === 'fulfilled' && 
+                const requiredNxDomainConfirmations = Math.max(1, providers.length);
+                const nxDomainConfirmations = confirmationResults.filter(result =>
+                    result.status === 'fulfilled' &&
+                    result.value.Status === DNS_STATUS_NXDOMAIN
+                ).length;
+
+                // Exact SOA answers are strong existence evidence. Authority
+                // SOA records in negative/NODATA responses are deliberately
+                // not treated as existence proof.
+                const anyRecordsFound = confirmationResults.some(result =>
+                    result.status === 'fulfilled' &&
                     result.value.Status === DNS_STATUS_NOERROR &&
-                    (result.value.Answer?.length || result.value.Authority?.length)
+                    hasExactAnswer(result.value, domain, [DNS_RECORD_TYPE_SOA, DNS_RECORD_TYPE_NS])
                 );
                 
                 const anyServfailOrSuggestiveErrors = confirmationResults.some(result =>
-                    (result.status === 'fulfilled' && result.value.Status === DNS_STATUS_SERVFAIL) ||
+                    (result.status === 'fulfilled' && [DNS_STATUS_SERVFAIL, DNS_STATUS_REFUSED].includes(result.value.Status)) ||
                     (result.status === 'rejected' && result.suggestsDomainExists)
                 );
                 
-                if (anyRecordsFound || anyServfailOrSuggestiveErrors) {
-                    // Any signs of existence mean we should be conservative
-                    confidenceReasons.push("Confirmation check found signs of domain existence. Marking as indeterminate.");
+                if (anyRecordsFound) {
+                    confidenceReasons.push("Confirmation check found exact SOA/NS evidence. Marking as registered.");
+                    domainResult.status = DomainAvailabilityStatus.REGISTERED;
+                } else if (anyServfailOrSuggestiveErrors) {
+                    confidenceReasons.push("Confirmation check returned conservative DNS uncertainty. Marking as indeterminate.");
                     domainResult.status = DomainAvailabilityStatus.INDETERMINATE;
-                } else {
-                    // All confirmations still suggest availability
-                    confidenceReasons.push("Confirmation check supports availability finding.");
+                } else if (nxDomainConfirmations >= requiredNxDomainConfirmations) {
+                    confidenceReasons.push(`Confirmation check supports availability finding (${nxDomainConfirmations}/${confirmationResults.length} NXDOMAIN confirmations).`);
                     domainResult.status = DomainAvailabilityStatus.AVAILABLE;
+                } else {
+                    confidenceReasons.push(`Confirmation check did not reach the required independent NXDOMAIN threshold (${nxDomainConfirmations}/${requiredNxDomainConfirmations}). Marking as indeterminate.`);
+                    domainResult.status = DomainAvailabilityStatus.INDETERMINATE;
                 }
             } catch (confirmError) {
                 // If confirmation fails, err on the side of caution
@@ -362,6 +374,7 @@ export default async function checkDomainAvailability(
         confidenceReasons.push(`Query completed in ${duration.toFixed(0)}ms with ${providers.length} providers.`)
         
         updateProgressState(CheckStage.COMPLETE, 100, `Check complete for ${domain}`)
+        domainResult.link = generateLink(domain, domainResult.status)
         
         return {
             ...domainResult,

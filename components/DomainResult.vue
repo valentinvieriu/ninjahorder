@@ -1,117 +1,86 @@
 <template>
-  <div 
-    class="bg-white rounded-lg shadow-md mb-4 overflow-visible transition-all duration-300"
+  <div
+    class="result-row"
     :class="{ 'animate-pulse-once': isNew }"
   >
-    <div class="grid grid-cols-12 p-4 gap-3 items-center">
-      <!-- Domain and Status Information - left side -->
-      <div class="col-span-6 flex items-center space-x-3">
-        <div :class="[
-          'w-4 h-4 rounded-full',
-          statusColorClass
-        ]"></div>
-        <span class="text-lg font-semibold">{{ result.domain }}</span>
-        
-        <!-- Parked domain badges -->
-        <div v-if="isParkedDomain" class="flex space-x-1">
-          <span v-if="result.isParkedByNs" 
-                class="px-2 py-0.5 text-xs font-medium rounded-full bg-orange-100 text-orange-800 border border-orange-300">
-            NS-Parked
-          </span>
-          <span v-if="result.isParkedByTxt" 
-                class="px-2 py-0.5 text-xs font-medium rounded-full bg-orange-100 text-orange-800 border border-orange-300">
-            TXT-Parked
-          </span>
+    <div class="result-main">
+      <div class="status-dot" :class="statusColorClass"></div>
+      <div class="domain-block">
+        <span class="domain-name">{{ result.domain }}</span>
+        <div class="meta-line">
+          <span v-if="result.confidenceScore !== undefined">Confidence {{ result.confidenceScore }}</span>
+          <span v-if="result.dnssecValidated">DNSSEC AD</span>
+          <span v-if="result.wildcardDetected">Wildcard DNS</span>
         </div>
       </div>
-      
-      <!-- Status and Actions - right side -->
-      <div class="col-span-6 flex items-center justify-end space-x-4">
-        <div class="flex items-center space-x-2">
-          <div class="px-3 py-1 text-xs font-medium rounded-full" :class="statusBadgeClass">
-            <span>{{ statusText }}</span>
+    </div>
+
+    <div v-if="isParkedDomain" class="parking-badges">
+      <span v-if="result.isParkedByNs">NS Parked</span>
+      <span v-if="result.isParkedByTxt">TXT Parked</span>
+    </div>
+
+    <div class="result-actions">
+      <span class="status-badge" :class="statusBadgeClass">{{ statusText }}</span>
+
+      <div class="info-wrap">
+        <button type="button" class="info-button" aria-label="Show DNS evidence">
+          i
+        </button>
+
+        <div class="evidence-tooltip">
+          <div class="tooltip-header">
+            <strong>{{ result.domain }}</strong>
+            <span class="status-badge compact" :class="statusBadgeClass">{{ statusText }}</span>
           </div>
-          
-          <!-- Info icon with tooltip - separated from status badge -->
-          <div class="relative">
-            <!-- Info icon button -->
-            <button type="button" class="flex items-center justify-center w-6 h-6 rounded-full hover:bg-gray-200 transition-colors">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              
-              <!-- Enhanced tooltip with wider width and table layout - Only shows on info icon hover -->
-              <div class="absolute top-0 right-0 transform translate-y-[-100%] mt-[-8px] p-4 bg-gray-800 text-white text-sm rounded opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-300 z-50 w-96 shadow-lg max-h-[500px] overflow-y-auto pointer-events-none">
-                <!-- Domain header -->
-                <div class="font-medium mb-3 text-lg border-b border-gray-600 pb-2 flex items-center">
-                  <span class="mr-2">{{ result.domain }}</span>
-                  <span class="px-2 py-0.5 text-xs font-medium rounded-full" :class="statusBadgeClass">{{ statusText }}</span>
-                </div>
-                
-                <!-- Table-like key metrics -->
-                <div class="grid grid-cols-2 gap-2 mb-3">
-                  <div class="bg-gray-700 p-2 rounded">
-                    <div class="text-xs text-gray-400">Status</div>
-                    <div class="font-medium">{{ statusText }}</div>
-                  </div>
-                  <div class="bg-gray-700 p-2 rounded">
-                    <div class="text-xs text-gray-400">DNSSEC</div>
-                    <div class="font-medium">{{ result.dnssecValidated ? 'Validated ✓' : 'Not validated' }}</div>
-                  </div>
-                  <div class="bg-gray-700 p-2 rounded">
-                    <div class="text-xs text-gray-400">Wildcard DNS</div>
-                    <div class="font-medium">{{ result.wildcardDetected ? 'Detected ⚠' : 'Not detected' }}</div>
-                  </div>
-                  <div class="bg-gray-700 p-2 rounded">
-                    <div class="text-xs text-gray-400">Parking</div>
-                    <div class="font-medium">{{ isParkedDomain ? `Detected (${parkingType})` : 'Not detected' }}</div>
-                  </div>
-                </div>
-                
-                <!-- Confidence reasons table -->
-                <div v-if="result.confidenceReasons.length > 0" class="mb-3">
-                  <div class="font-medium border-b border-gray-600 pb-1 mb-2">Analysis Steps</div>
-                  <table class="w-full text-xs">
-                    <tbody>
-                      <template v-for="(reason, index) in formattedReasons" :key="index">
-                        <tr :class="[
-                          'border-b border-gray-700 last:border-0',
-                          { 'bg-gray-700': reason.isSubItem }
-                        ]">
-                          <td class="py-1.5 pr-2 w-4">
-                            <div v-if="!reason.isSubItem" 
-                                :class="['w-3 h-3 rounded-full', 
-                                  reason.isPositive ? 'bg-green-500' : 
-                                  reason.isNegative ? 'bg-red-500' : 'bg-gray-400']">
-                            </div>
-                            <div v-else class="pl-2">→</div>
-                          </td>
-                          <td class="py-1.5 whitespace-normal">{{ reason.text }}</td>
-                        </tr>
-                      </template>
-                    </tbody>
-                  </table>
-                </div>
-                
-                <!-- Additional information footer -->
-                <div class="text-xs text-gray-400 border-t border-gray-600 pt-2 mt-2">
-                  Click "{{ buttonText }}" for more information at {{ domainLinkHost }}
-                </div>
-              </div>
-            </button>
+
+          <div class="metric-grid">
+            <div>
+              <span>Status</span>
+              <strong>{{ statusText }}</strong>
+            </div>
+            <div>
+              <span>DNSSEC</span>
+              <strong>{{ result.dnssecValidated ? 'Validated' : 'Not validated' }}</strong>
+            </div>
+            <div>
+              <span>Wildcard</span>
+              <strong>{{ result.wildcardDetected ? 'Detected' : 'Not detected' }}</strong>
+            </div>
+            <div>
+              <span>Parking</span>
+              <strong>{{ isParkedDomain ? parkingType : 'Not detected' }}</strong>
+            </div>
+          </div>
+
+          <div v-if="result.confidenceReasons.length > 0" class="reason-list">
+            <div class="tooltip-section-title">Analysis steps</div>
+            <div
+              v-for="(reason, index) in formattedReasons"
+              :key="index"
+              class="reason-item"
+              :class="{ sub: reason.isSubItem, positive: reason.isPositive, negative: reason.isNegative }"
+            >
+              <span class="reason-dot"></span>
+              <p>{{ reason.text }}</p>
+            </div>
+          </div>
+
+          <div class="tooltip-footer">
+            Action opens {{ domainLinkHost }}.
           </div>
         </div>
-        
-        <a
-          :href="domainLink"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors duration-300"
-          :class="{ 'opacity-50 cursor-not-allowed': result.status === 'error' || result.status === 'indeterminate' }"
-        >
-          {{ buttonText }}
-        </a>
       </div>
+
+      <a
+        :href="domainLink"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="action-link"
+        :class="{ muted: result.status === 'error' || result.status === 'indeterminate' }"
+      >
+        {{ buttonText }}
+      </a>
     </div>
   </div>
 </template>
@@ -127,6 +96,7 @@ const props = defineProps<{
     error: boolean
     link: string
     confidenceReasons: string[]
+    confidenceScore?: number
     dnssecValidated?: boolean
     wildcardDetected?: boolean
     isParkedByNs: boolean
@@ -134,11 +104,9 @@ const props = defineProps<{
   }
 }>()
 
-// Animation for newly added results
 const isNew = ref(true)
 
 onMounted(() => {
-  // Reset the animation state after a short delay
   setTimeout(() => {
     isNew.value = false
   }, 1500)
@@ -149,14 +117,13 @@ const isParkedDomain = computed(() => {
 })
 
 const parkingType = computed(() => {
-  if (props.result.isParkedByNs && props.result.isParkedByTxt) return 'NS & TXT'
+  if (props.result.isParkedByNs && props.result.isParkedByTxt) return 'NS and TXT'
   if (props.result.isParkedByNs) return 'NS'
   if (props.result.isParkedByTxt) return 'TXT'
   return 'None'
 })
 
 const domainLink = computed(() => {
-  // For parked domains, always use domainr.com for additional info
   if (isParkedDomain.value && props.result.status === DomainAvailabilityStatus.REGISTERED) {
     return `https://domainr.com/${props.result.domain}`
   }
@@ -174,51 +141,35 @@ const domainLinkHost = computed(() => {
 
 const statusColorClass = computed(() => {
   switch (props.result.status) {
-    case DomainAvailabilityStatus.AVAILABLE: 
-      return 'bg-green-500'
-    case DomainAvailabilityStatus.REGISTERED: 
-      return isParkedDomain.value ? 'bg-orange-500' : 'bg-red-500'
-    case DomainAvailabilityStatus.PREMIUM: 
-      return 'bg-purple-500'
-    case DomainAvailabilityStatus.INDETERMINATE: 
-      return 'bg-yellow-500'
+    case DomainAvailabilityStatus.AVAILABLE:
+      return 'available'
+    case DomainAvailabilityStatus.REGISTERED:
+      return isParkedDomain.value ? 'parked' : 'registered'
+    case DomainAvailabilityStatus.PREMIUM:
+      return 'premium'
+    case DomainAvailabilityStatus.INDETERMINATE:
+      return 'indeterminate'
     case DomainAvailabilityStatus.ERROR:
     default:
-      return 'bg-gray-500'
+      return 'error'
   }
 })
 
-const statusBadgeClass = computed(() => {
-  switch (props.result.status) {
-    case DomainAvailabilityStatus.AVAILABLE: 
-      return 'bg-green-100 text-green-800 border border-green-300'
-    case DomainAvailabilityStatus.REGISTERED: 
-      return isParkedDomain.value 
-        ? 'bg-orange-100 text-orange-800 border border-orange-300'
-        : 'bg-red-100 text-red-800 border border-red-300'
-    case DomainAvailabilityStatus.PREMIUM: 
-      return 'bg-purple-100 text-purple-800 border border-purple-300'
-    case DomainAvailabilityStatus.INDETERMINATE: 
-      return 'bg-yellow-100 text-yellow-800 border border-yellow-300'
-    case DomainAvailabilityStatus.ERROR:
-    default:
-      return 'bg-gray-100 text-gray-800 border border-gray-300'
-  }
-})
+const statusBadgeClass = computed(() => statusColorClass.value)
 
 const statusText = computed(() => {
   if (props.result.status === DomainAvailabilityStatus.REGISTERED && isParkedDomain.value) {
-    return 'Registered (Parked)'
+    return 'Registered Parked'
   }
-  
+
   switch (props.result.status) {
-    case DomainAvailabilityStatus.AVAILABLE: 
-      return 'Available'
-    case DomainAvailabilityStatus.REGISTERED: 
+    case DomainAvailabilityStatus.AVAILABLE:
+      return 'Likely Available'
+    case DomainAvailabilityStatus.REGISTERED:
       return 'Registered'
-    case DomainAvailabilityStatus.PREMIUM: 
-      return 'Premium Domain'
-    case DomainAvailabilityStatus.INDETERMINATE: 
+    case DomainAvailabilityStatus.PREMIUM:
+      return 'Premium Signal'
+    case DomainAvailabilityStatus.INDETERMINATE:
       return 'Indeterminate'
     case DomainAvailabilityStatus.ERROR:
       return 'Error'
@@ -231,39 +182,40 @@ const formattedReasons = computed(() => {
   return props.result.confidenceReasons.map(reason => {
     const isSubItem = reason.trim().startsWith('->') || reason.trim().startsWith(' ->')
     const text = isSubItem ? reason.replace(/^->\s*/, '') : reason
-    
-    // Determine if this is a positive or negative reason
+
+    const lower = text.toLowerCase()
     const isPositive = !isSubItem && (
-      text.toLowerCase().includes('available') ||
-      text.toLowerCase().includes('nxdomain') ||
-      text.toLowerCase().includes('high confidence') && text.toLowerCase().includes('available')
+      lower.includes('available') ||
+      lower.includes('nxdomain') ||
+      lower.includes('confirmation check supports')
     )
-    
+
     const isNegative = !isSubItem && (
-      text.toLowerCase().includes('registered') ||
-      text.toLowerCase().includes('ns/soa records') ||
-      text.toLowerCase().includes('parking') ||
-      text.toLowerCase().includes('premium') ||
-      text.toLowerCase().includes('error')
+      lower.includes('registered') ||
+      lower.includes('ns/soa') ||
+      lower.includes('parking') ||
+      lower.includes('premium') ||
+      lower.includes('error') ||
+      lower.includes('indeterminate')
     )
-    
+
     return { text, isSubItem, isPositive, isNegative }
   })
 })
 
 const buttonText = computed(() => {
   if (props.result.status === DomainAvailabilityStatus.REGISTERED && isParkedDomain.value) {
-    return 'View Details'
+    return 'Details'
   }
-  
+
   switch (props.result.status) {
-    case DomainAvailabilityStatus.AVAILABLE: 
+    case DomainAvailabilityStatus.AVAILABLE:
       return 'Register'
-    case DomainAvailabilityStatus.REGISTERED: 
+    case DomainAvailabilityStatus.REGISTERED:
       return 'Visit'
-    case DomainAvailabilityStatus.PREMIUM: 
+    case DomainAvailabilityStatus.PREMIUM:
       return 'Purchase'
-    case DomainAvailabilityStatus.INDETERMINATE: 
+    case DomainAvailabilityStatus.INDETERMINATE:
       return 'Check'
     case DomainAvailabilityStatus.ERROR:
     default:
@@ -273,20 +225,320 @@ const buttonText = computed(() => {
 </script>
 
 <style scoped>
-/* Fix for tooltip positioning */
-.relative:hover .group-hover\:opacity-100 {
-  opacity: 1;
-  visibility: visible;
+.result-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 72px;
+  margin-bottom: 9px;
+  padding: 12px;
+  border: 1px solid oklch(100% 0 0 / 0.19);
+  border-radius: var(--nh-radius);
+  background:
+    linear-gradient(145deg, oklch(100% 0 0 / 0.13), oklch(100% 0 0 / 0.06)),
+    oklch(100% 0 0 / 0.08);
+  box-shadow: 0 12px 36px oklch(5% 0.035 260 / 0.22), inset 0 1px 0 oklch(100% 0 0 / 0.18);
+  backdrop-filter: blur(18px) saturate(1.32);
+  -webkit-backdrop-filter: blur(18px) saturate(1.32);
 }
 
-/* Create a custom animation for new results */
+.result-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+}
+
+.status-dot {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  box-shadow: 0 0 18px currentColor;
+}
+
+.status-dot.available { color: var(--nh-lime); background: var(--nh-lime); }
+.status-dot.registered { color: var(--nh-rose); background: var(--nh-rose); }
+.status-dot.parked { color: var(--nh-amber); background: var(--nh-amber); }
+.status-dot.premium { color: var(--nh-violet); background: var(--nh-violet); }
+.status-dot.indeterminate { color: var(--nh-amber); background: var(--nh-amber); }
+.status-dot.error { color: oklch(72% 0.02 250); background: oklch(72% 0.02 250); }
+
+.domain-block {
+  min-width: 0;
+}
+
+.domain-name {
+  display: block;
+  color: var(--nh-text);
+  font-size: 1.02rem;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-height: 18px;
+  margin-top: 2px;
+}
+
+.meta-line span,
+.parking-badges span {
+  color: oklch(84% 0.04 245 / 0.82);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.parking-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.parking-badges span {
+  padding: 5px 8px;
+  border: 1px solid oklch(82% 0.16 78 / 0.36);
+  border-radius: 999px;
+  color: oklch(90% 0.10 78);
+  background: oklch(82% 0.16 78 / 0.11);
+}
+
+.result-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.status-badge,
+.action-link,
+.info-button {
+  min-height: 32px;
+  border-radius: var(--nh-radius);
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border: 1px solid oklch(100% 0 0 / 0.18);
+  white-space: nowrap;
+}
+
+.status-badge.compact {
+  min-height: 24px;
+  font-size: 0.7rem;
+}
+
+.status-badge.available { color: oklch(90% 0.12 142); background: oklch(82% 0.17 142 / 0.12); border-color: oklch(82% 0.17 142 / 0.34); }
+.status-badge.registered { color: oklch(89% 0.11 25); background: oklch(69% 0.19 25 / 0.12); border-color: oklch(69% 0.19 25 / 0.34); }
+.status-badge.parked { color: oklch(91% 0.11 78); background: oklch(82% 0.16 78 / 0.12); border-color: oklch(82% 0.16 78 / 0.34); }
+.status-badge.premium { color: oklch(90% 0.09 300); background: oklch(72% 0.18 300 / 0.13); border-color: oklch(72% 0.18 300 / 0.34); }
+.status-badge.indeterminate { color: oklch(91% 0.11 78); background: oklch(82% 0.16 78 / 0.12); border-color: oklch(82% 0.16 78 / 0.34); }
+.status-badge.error { color: oklch(87% 0.03 245); background: oklch(72% 0.02 250 / 0.12); border-color: oklch(100% 0 0 / 0.16); }
+
+.info-wrap {
+  position: relative;
+}
+
+.info-button {
+  width: 32px;
+  border: 1px solid oklch(100% 0 0 / 0.18);
+  color: var(--nh-text);
+  background: oklch(100% 0 0 / 0.08);
+  line-height: 1;
+}
+
+.info-button:hover {
+  background: oklch(100% 0 0 / 0.15);
+}
+
+.evidence-tooltip {
+  position: absolute;
+  right: 0;
+  top: -10px;
+  z-index: 40;
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(520px, 75vh);
+  padding: 13px;
+  overflow-y: auto;
+  transform: translateY(-100%) scale(0.98);
+  transform-origin: bottom right;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  border: 1px solid oklch(100% 0 0 / 0.22);
+  border-radius: var(--nh-radius);
+  color: var(--nh-text);
+  background:
+    linear-gradient(145deg, oklch(25% 0.055 260 / 0.88), oklch(14% 0.045 255 / 0.92));
+  box-shadow: 0 24px 70px oklch(4% 0.035 260 / 0.55), inset 0 1px 0 oklch(100% 0 0 / 0.18);
+  backdrop-filter: blur(24px) saturate(1.25);
+  -webkit-backdrop-filter: blur(24px) saturate(1.25);
+  transition: opacity 160ms ease, transform 160ms ease, visibility 160ms ease;
+}
+
+.info-wrap:hover .evidence-tooltip,
+.info-wrap:focus-within .evidence-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(-100%) scale(1);
+  pointer-events: auto;
+}
+
+.tooltip-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  padding-bottom: 10px;
+  border-bottom: 1px solid oklch(100% 0 0 / 0.13);
+}
+
+.tooltip-header strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.metric-grid div {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid oklch(100% 0 0 / 0.12);
+  border-radius: var(--nh-radius);
+  background: oklch(100% 0 0 / 0.07);
+}
+
+.metric-grid span,
+.tooltip-section-title,
+.tooltip-footer {
+  display: block;
+  color: oklch(82% 0.04 245 / 0.76);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.metric-grid strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.reason-list {
+  margin-top: 12px;
+}
+
+.tooltip-section-title {
+  margin-bottom: 7px;
+  text-transform: uppercase;
+}
+
+.reason-item {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid oklch(100% 0 0 / 0.08);
+}
+
+.reason-item.sub {
+  padding-left: 12px;
+}
+
+.reason-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: oklch(78% 0.03 245);
+}
+
+.reason-item.positive .reason-dot {
+  background: var(--nh-lime);
+}
+
+.reason-item.negative .reason-dot {
+  background: var(--nh-rose);
+}
+
+.reason-item p {
+  margin: 0;
+  color: oklch(94% 0.02 245);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.tooltip-footer {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid oklch(100% 0 0 / 0.12);
+}
+
+.action-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  padding: 0 12px;
+  color: oklch(12% 0.04 260);
+  background: linear-gradient(135deg, var(--nh-cyan), var(--nh-violet));
+  text-decoration: none;
+  box-shadow: 0 10px 24px oklch(72% 0.18 300 / 0.22);
+}
+
+.action-link:hover {
+  filter: brightness(1.08) saturate(1.08);
+}
+
+.action-link.muted {
+  color: var(--nh-muted);
+  background: oklch(100% 0 0 / 0.08);
+  box-shadow: none;
+  border: 1px solid oklch(100% 0 0 / 0.14);
+}
+
 @keyframes pulse-once {
-  0% { background-color: rgba(0, 0, 0, 0.05); }
-  50% { background-color: rgba(0, 0, 0, 0); }
-  100% { background-color: rgba(0, 0, 0, 0); }
+  0% { box-shadow: 0 0 0 0 oklch(83% 0.145 205 / 0.42), inset 0 1px 0 oklch(100% 0 0 / 0.18); }
+  100% { box-shadow: 0 12px 36px oklch(5% 0.035 260 / 0.22), inset 0 1px 0 oklch(100% 0 0 / 0.18); }
 }
 
 .animate-pulse-once {
   animation: pulse-once 1.5s ease-in-out;
+}
+
+@media (max-width: 760px) {
+  .result-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .parking-badges,
+  .result-actions {
+    justify-content: flex-start;
+  }
+
+  .result-actions {
+    flex-wrap: wrap;
+  }
+
+  .evidence-tooltip {
+    left: 0;
+    right: auto;
+    transform-origin: bottom left;
+  }
 }
 </style>
