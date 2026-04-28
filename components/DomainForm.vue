@@ -56,8 +56,11 @@
           v-model="popularTLDsChecked"
           aria-label="Include popular TLDs"
         />
-        <span>Popular</span>
-        <small>{{ popularTLDs.length }} zones</small>
+        <span class="toggle-copy">
+          <span class="toggle-title">Popular</span>
+          <small>{{ popularTLDs.length }} zones</small>
+        </span>
+        <span class="toggle-indicator" aria-hidden="true"></span>
       </label>
 
       <label class="tld-toggle" :class="{ selected: countryTLDsChecked }">
@@ -66,8 +69,11 @@
           v-model="countryTLDsChecked"
           aria-label="Include country TLDs"
         />
-        <span>Country</span>
-        <small>{{ countryTLDs.length }} zones</small>
+        <span class="toggle-copy">
+          <span class="toggle-title">Country</span>
+          <small>{{ countryTLDs.length }} zones</small>
+        </span>
+        <span class="toggle-indicator" aria-hidden="true"></span>
       </label>
 
       <label class="tld-toggle" :class="{ selected: customTLDsChecked }">
@@ -76,8 +82,11 @@
           v-model="customTLDsChecked"
           aria-label="Include custom modern TLDs"
         />
-        <span>Modern</span>
-        <small>{{ customTLDs.length }} zones</small>
+        <span class="toggle-copy">
+          <span class="toggle-title">Modern</span>
+          <small>{{ customTLDs.length }} zones</small>
+        </span>
+        <span class="toggle-indicator" aria-hidden="true"></span>
       </label>
     </div>
 
@@ -91,8 +100,11 @@
         v-model="verifyWithRdap"
         aria-label="Verify likely available domains with RDAP"
       />
-      <span>RDAP verify</span>
-      <small>Registry data</small>
+      <span class="toggle-copy">
+        <span class="toggle-title">RDAP verify</span>
+        <small>Registry data</small>
+      </span>
+      <span class="toggle-indicator" aria-hidden="true"></span>
     </label>
   </form>
 </template>
@@ -308,16 +320,20 @@ h2 {
 
 .tld-toggle,
 .rdap-toggle {
+  position: relative;
   display: grid;
-  gap: 1px;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  gap: 10px;
+  align-items: center;
   min-height: 58px;
   padding: 10px 12px;
-  border: 1px solid oklch(100% 0 0 / 0.18);
+  border: 1px solid oklch(100% 0 0 / 0.14);
   border-radius: var(--nh-radius);
   color: var(--nh-muted);
-  background: oklch(100% 0 0 / 0.08);
+  background: oklch(8% 0.035 260 / 0.34);
   cursor: pointer;
-  transition: transform 180ms ease, border-color 180ms ease, background 180ms ease, color 180ms ease;
+  opacity: 0.72;
+  transition: transform 180ms ease, border-color 180ms ease, background 180ms ease, color 180ms ease, opacity 180ms ease, box-shadow 180ms ease;
 }
 
 .tld-toggle input,
@@ -327,8 +343,13 @@ h2 {
   pointer-events: none;
 }
 
-.tld-toggle span,
-.rdap-toggle span {
+.toggle-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.toggle-title {
   color: var(--nh-text);
   font-size: 0.92rem;
   font-weight: 900;
@@ -341,18 +362,72 @@ h2 {
   font-weight: 700;
 }
 
+.toggle-indicator {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  border: 1px solid oklch(100% 0 0 / 0.26);
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.07);
+  box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.16);
+}
+
+.toggle-indicator::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 4px;
+  width: 7px;
+  height: 12px;
+  border-right: 2px solid oklch(10% 0.04 260);
+  border-bottom: 2px solid oklch(10% 0.04 260);
+  opacity: 0;
+  transform: rotate(42deg) scale(0.7);
+  transform-origin: center;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
 .tld-toggle.selected,
 .rdap-toggle.selected {
-  border-color: oklch(83% 0.145 205 / 0.72);
+  border-color: oklch(83% 0.145 205 / 0.88);
   background:
-    linear-gradient(135deg, oklch(83% 0.145 205 / 0.20), oklch(72% 0.18 300 / 0.12));
-  box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.28), 0 0 24px oklch(83% 0.145 205 / 0.14);
+    linear-gradient(135deg, oklch(83% 0.145 205 / 0.27), oklch(72% 0.18 300 / 0.15)),
+    oklch(100% 0 0 / 0.10);
+  box-shadow:
+    inset 3px 0 0 var(--nh-cyan),
+    inset 0 1px 0 oklch(100% 0 0 / 0.34),
+    0 0 0 1px oklch(83% 0.145 205 / 0.16),
+    0 14px 34px oklch(83% 0.145 205 / 0.16);
+  opacity: 1;
+}
+
+.tld-toggle.selected .toggle-indicator,
+.rdap-toggle.selected .toggle-indicator {
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--nh-cyan), var(--nh-lime));
+  box-shadow: 0 0 18px oklch(83% 0.145 205 / 0.30);
+}
+
+.tld-toggle.selected .toggle-indicator::after,
+.rdap-toggle.selected .toggle-indicator::after {
+  opacity: 1;
+  transform: rotate(42deg) scale(1);
 }
 
 .tld-toggle:hover,
 .rdap-toggle:hover {
   transform: translateY(-1px);
   border-color: oklch(100% 0 0 / 0.30);
+  opacity: 1;
+}
+
+.tld-toggle:focus-within,
+.rdap-toggle:focus-within {
+  outline: none;
+  border-color: oklch(83% 0.145 205 / 0.86);
+  box-shadow:
+    0 0 0 3px oklch(83% 0.145 205 / 0.18),
+    inset 0 1px 0 oklch(100% 0 0 / 0.22);
 }
 
 .rdap-toggle {

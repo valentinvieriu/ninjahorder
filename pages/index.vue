@@ -87,24 +87,87 @@
           <p class="console-label">Evidence board</p>
           <h2>Results</h2>
         </div>
-        <div class="result-count">{{ totalResults }} domains</div>
+        <div class="result-count">{{ filteredResultsCount }} / {{ totalResults }} domains</div>
       </div>
 
-      <div v-if="results.available.length > 0" class="result-group">
-        <h3>Likely Available — Verify</h3>
-        <DomainResult v-for="result in results.available" :key="result.domain" :result="result" />
+      <div class="result-filters" aria-label="Filter results">
+        <div class="filter-search">
+          <label for="result-search">Find</label>
+          <input
+            id="result-search"
+            v-model="resultSearch"
+            type="search"
+            class="glass-field"
+            placeholder="domain or .tld"
+          />
+        </div>
+
+        <div class="filter-set" aria-label="Status filter">
+          <span class="filter-label">Status</span>
+          <div class="filter-chips">
+            <button
+              v-for="option in statusFilterOptions"
+              :key="option.value"
+              type="button"
+              class="filter-chip"
+              :class="{ active: statusFilter === option.value }"
+              :disabled="option.count === 0 && statusFilter !== option.value"
+              @click="statusFilter = option.value"
+            >
+              <span>{{ option.label }}</span>
+              <strong>{{ option.count }}</strong>
+            </button>
+          </div>
+        </div>
+
+        <div class="filter-set" aria-label="TLD group filter">
+          <span class="filter-label">TLD</span>
+          <div class="filter-chips">
+            <button
+              v-for="option in tldFilterOptions"
+              :key="option.value"
+              type="button"
+              class="filter-chip"
+              :class="{ active: tldFilter === option.value }"
+              :disabled="option.count === 0 && tldFilter !== option.value"
+              @click="tldFilter = option.value"
+            >
+              <span>{{ option.label }}</span>
+              <strong>{{ option.count }}</strong>
+            </button>
+          </div>
+        </div>
+
+        <button
+          v-if="filtersActive"
+          type="button"
+          class="clear-filters"
+          @click="clearResultFilters"
+        >
+          Clear
+        </button>
       </div>
-      <div v-if="results.premium.length > 0" class="result-group">
-        <h3>Premium Signals</h3>
-        <DomainResult v-for="result in results.premium" :key="result.domain" :result="result" />
+
+      <div v-if="filteredResultsCount === 0" class="empty-results">
+        <strong>No matches</strong>
+        <span>Change the filters or clear them to show all domains.</span>
       </div>
-      <div v-if="results.notAvailable.length > 0" class="result-group">
-        <h3>Registered</h3>
-        <DomainResult v-for="result in results.notAvailable" :key="result.domain" :result="result" />
+
+      <div v-if="filteredGroups.available.length > 0" class="result-group">
+        <h3>Likely Available — Verify <span>{{ filteredGroups.available.length }}</span></h3>
+        <DomainResult v-for="result in filteredGroups.available" :key="result.domain" :result="result" />
       </div>
-      <div v-if="results.other?.length > 0" class="result-group">
-        <h3>Indeterminate / Error</h3>
-        <DomainResult v-for="result in results.other" :key="result.domain" :result="result" />
+      <div v-if="filteredGroups.premium.length > 0" class="result-group">
+        <h3>Premium Signals <span>{{ filteredGroups.premium.length }}</span></h3>
+        <DomainResult v-for="result in filteredGroups.premium" :key="result.domain" :result="result" />
+      </div>
+      <div v-if="filteredGroups.notAvailable.length > 0" class="result-group">
+        <h3>Registered <span>{{ filteredGroups.notAvailable.length }}</span></h3>
+        <DomainResult v-for="result in filteredGroups.notAvailable" :key="result.domain" :result="result" />
+      </div>
+      <div v-if="filteredGroups.other.length > 0" class="result-group">
+        <h3>Indeterminate / Error <span>{{ filteredGroups.other.length }}</span></h3>
+        <DomainResult v-for="result in filteredGroups.other" :key="result.domain" :result="result" />
       </div>
     </section>
   </div>
@@ -112,12 +175,25 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { useDomainCheck, stageMessages, CheckStage } from '~/composables/useDomainCheck'
+import { useDomainCheck, stageMessages, CheckStage, DomainAvailabilityStatus } from '~/composables/useDomainCheck'
+import type { DomainResult } from '~/composables/domain'
 import { ACTIVE_DOH_PROVIDER_KEYS, PROVIDERS } from '~/config/appConfig'
+import { popularTLDs, countryTLDs, customTLDs } from '~/utils/tlds'
 
 const { checkDomains, groupedResults, progress, isChecking, cancelCheck } = useDomainCheck()
 const results = groupedResults
 const wasCancelled = ref(false)
+type StatusFilter = 'all' | 'needs_review' | DomainAvailabilityStatus.AVAILABLE | DomainAvailabilityStatus.REGISTERED | DomainAvailabilityStatus.PREMIUM
+type TldFilter = 'all' | 'popular' | 'country' | 'modern'
+
+const resultSearch = ref('')
+const statusFilter = ref<StatusFilter>('all')
+const tldFilter = ref<TldFilter>('all')
+const popularTldSet = new Set(popularTLDs)
+const countryTldSet = new Set(countryTLDs)
+const customTldSet = new Set(customTLDs)
+const knownTlds = Array.from(new Set([...popularTLDs, ...countryTLDs, ...customTLDs]))
+  .sort((a, b) => b.length - a.length)
 
 watch(() => progress.value.stage, (newStage) => {
   if (newStage === CheckStage.CANCELLED) {
@@ -146,19 +222,109 @@ const initialFormData = ref({
   verifyWithRdap: false,
 })
 
-const hasResults = computed(() =>
-  results.value.available.length > 0 ||
-  results.value.premium.length > 0 ||
-  results.value.notAvailable.length > 0 ||
-  results.value.other.length > 0
+const allResults = computed<DomainResult[]>(() => [
+  ...results.value.available,
+  ...results.value.premium,
+  ...results.value.notAvailable,
+  ...results.value.other,
+])
+
+const totalResults = computed(() => allResults.value.length)
+
+const hasResults = computed(() => totalResults.value > 0)
+
+const getDomainTld = (domain: string): string => {
+  const normalized = domain.toLowerCase()
+  const knownMatch = knownTlds.find(tld => normalized.endsWith(tld))
+
+  if (knownMatch) return knownMatch
+
+  const [, ...parts] = normalized.split('.')
+  return parts.length > 0 ? `.${parts.join('.')}` : ''
+}
+
+const getTldGroup = (domain: string): Exclude<TldFilter, 'all'> | 'unknown' => {
+  const tld = getDomainTld(domain)
+
+  if (popularTldSet.has(tld)) return 'popular'
+  if (countryTldSet.has(tld)) return 'country'
+  if (customTldSet.has(tld)) return 'modern'
+  return 'unknown'
+}
+
+const matchesStatusFilter = (result: DomainResult, filter: StatusFilter) => {
+  if (filter === 'all') return true
+  if (filter === 'needs_review') {
+    return result.status === DomainAvailabilityStatus.INDETERMINATE ||
+      result.status === DomainAvailabilityStatus.ERROR
+  }
+
+  return result.status === filter
+}
+
+const matchesTldFilter = (result: DomainResult, filter: TldFilter) => {
+  if (filter === 'all') return true
+  return getTldGroup(result.domain) === filter
+}
+
+const filteredResults = computed(() => {
+  const query = resultSearch.value.trim().toLowerCase()
+
+  return allResults.value.filter(result => {
+    const matchesSearch = !query ||
+      result.domain.toLowerCase().includes(query) ||
+      getDomainTld(result.domain).includes(query.startsWith('.') ? query : `.${query}`)
+
+    return matchesSearch &&
+      matchesStatusFilter(result, statusFilter.value) &&
+      matchesTldFilter(result, tldFilter.value)
+  })
+})
+
+const filteredResultsCount = computed(() => filteredResults.value.length)
+
+const filteredGroups = computed(() => ({
+  available: filteredResults.value.filter(result => result.status === DomainAvailabilityStatus.AVAILABLE),
+  premium: filteredResults.value.filter(result => result.status === DomainAvailabilityStatus.PREMIUM),
+  notAvailable: filteredResults.value.filter(result => result.status === DomainAvailabilityStatus.REGISTERED),
+  other: filteredResults.value.filter(result =>
+    result.status === DomainAvailabilityStatus.INDETERMINATE ||
+    result.status === DomainAvailabilityStatus.ERROR
+  ),
+}))
+
+const countStatus = (filter: StatusFilter) =>
+  allResults.value.filter(result => matchesStatusFilter(result, filter)).length
+
+const countTldGroup = (filter: TldFilter) =>
+  allResults.value.filter(result => matchesTldFilter(result, filter)).length
+
+const statusFilterOptions = computed<Array<{ value: StatusFilter, label: string, count: number }>>(() => [
+  { value: 'all', label: 'All', count: totalResults.value },
+  { value: DomainAvailabilityStatus.AVAILABLE, label: 'Likely', count: countStatus(DomainAvailabilityStatus.AVAILABLE) },
+  { value: DomainAvailabilityStatus.PREMIUM, label: 'Premium', count: countStatus(DomainAvailabilityStatus.PREMIUM) },
+  { value: DomainAvailabilityStatus.REGISTERED, label: 'Registered', count: countStatus(DomainAvailabilityStatus.REGISTERED) },
+  { value: 'needs_review', label: 'Review', count: countStatus('needs_review') },
+])
+
+const tldFilterOptions = computed<Array<{ value: TldFilter, label: string, count: number }>>(() => [
+  { value: 'all', label: 'All', count: totalResults.value },
+  { value: 'popular', label: 'Popular', count: countTldGroup('popular') },
+  { value: 'country', label: 'Country', count: countTldGroup('country') },
+  { value: 'modern', label: 'Modern', count: countTldGroup('modern') },
+])
+
+const filtersActive = computed(() =>
+  resultSearch.value.trim().length > 0 ||
+  statusFilter.value !== 'all' ||
+  tldFilter.value !== 'all'
 )
 
-const totalResults = computed(() =>
-  results.value.available.length +
-  results.value.premium.length +
-  results.value.notAvailable.length +
-  results.value.other.length
-)
+const clearResultFilters = () => {
+  resultSearch.value = ''
+  statusFilter.value = 'all'
+  tldFilter.value = 'all'
+}
 
 const activeProviders = computed(() => {
   if (progress.value.providers && progress.value.providers.length > 0) {
@@ -476,17 +642,157 @@ const handleCancel = () => {
   margin-top: 24px;
 }
 
+.result-filters {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.7fr) minmax(0, 1fr) minmax(0, 0.9fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid oklch(100% 0 0 / 0.16);
+  border-radius: var(--nh-radius);
+  background:
+    linear-gradient(145deg, oklch(100% 0 0 / 0.10), oklch(100% 0 0 / 0.05)),
+    oklch(8% 0.035 260 / 0.24);
+  box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.14);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+}
+
+.filter-search {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.filter-search label,
+.filter-label {
+  color: oklch(82% 0.04 245 / 0.84);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.filter-search input {
+  width: 100%;
+  height: 38px;
+  padding: 0 11px;
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.filter-set {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.filter-chip,
+.clear-filters {
+  min-height: 38px;
+  border: 1px solid oklch(100% 0 0 / 0.15);
+  border-radius: var(--nh-radius);
+  color: var(--nh-muted);
+  background: oklch(100% 0 0 / 0.07);
+  font-weight: 900;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease, opacity 160ms ease;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  font-size: 0.78rem;
+}
+
+.filter-chip strong {
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--nh-text);
+  background: oklch(100% 0 0 / 0.10);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
+.filter-chip.active {
+  color: oklch(94% 0.08 205);
+  border-color: oklch(83% 0.145 205 / 0.68);
+  background:
+    linear-gradient(135deg, oklch(83% 0.145 205 / 0.18), oklch(72% 0.18 300 / 0.11)),
+    oklch(100% 0 0 / 0.08);
+  box-shadow: inset 0 -2px 0 var(--nh-cyan);
+}
+
+.filter-chip:hover:not(:disabled),
+.clear-filters:hover {
+  color: var(--nh-text);
+  border-color: oklch(100% 0 0 / 0.28);
+  background: oklch(100% 0 0 / 0.11);
+}
+
+.filter-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.clear-filters {
+  align-self: end;
+  padding: 0 12px;
+  color: oklch(91% 0.10 78);
+  border-color: oklch(82% 0.16 78 / 0.34);
+  background: oklch(82% 0.16 78 / 0.09);
+  font-size: 0.78rem;
+}
+
+.empty-results {
+  display: grid;
+  gap: 3px;
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid oklch(100% 0 0 / 0.15);
+  border-radius: var(--nh-radius);
+  color: var(--nh-muted);
+  background: oklch(100% 0 0 / 0.06);
+}
+
+.empty-results strong {
+  color: var(--nh-text);
+}
+
 .result-group {
   margin-top: 16px;
 }
 
 .result-group h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0 0 10px;
   color: var(--nh-muted);
   font-size: 0.86rem;
   font-weight: 900;
   text-transform: uppercase;
   letter-spacing: 0;
+}
+
+.result-group h3 span {
+  min-width: 24px;
+  padding: 2px 7px;
+  border: 1px solid oklch(100% 0 0 / 0.14);
+  border-radius: 999px;
+  color: var(--nh-text);
+  background: oklch(100% 0 0 / 0.08);
+  font-size: 0.72rem;
+  text-align: center;
 }
 
 @keyframes meter-pulse {
@@ -518,6 +824,10 @@ const handleCancel = () => {
   .results-header {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .result-filters {
+    grid-template-columns: 1fr;
   }
 
   .domain-counter,
