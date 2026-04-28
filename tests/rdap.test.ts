@@ -5,6 +5,7 @@ import {
   applyRdapVerification,
   buildRdapDomainUrl,
   checkRdapDomain,
+  getRdapSupportForRootTlds,
   resetRdapBootstrapCacheForTests,
 } from '../composables/domain/rdap'
 import { buildDomainCheckCacheKey } from '../composables/domain/cache'
@@ -82,6 +83,28 @@ test('RDAP bootstrap resolves root TLD and builds the domain query URL', async (
     'https://rdap.nic.uk/domain/mybiz.co.uk',
   ])
   assert.equal(buildRdapDomainUrl('https://rdap.example/rdap', 'Example.TEST'), 'https://rdap.example/rdap/domain/example.test')
+})
+
+test('RDAP support lookup reports bootstrap-backed TLDs before domain queries', async () => {
+  const calls: string[] = []
+
+  const support = await withMockedFetch((url) => {
+    calls.push(url)
+    assert.equal(url, 'https://data.iana.org/rdap/dns.json')
+
+    return jsonResponse(200, bootstrapResponse([
+      [['com', 'net'], ['https://rdap.example/rdap']],
+      [['test'], ['http://rdap.test/rdap']],
+    ]))
+  }, () => getRdapSupportForRootTlds(['.COM', 'unknown', 'test']))
+
+  assert.equal(calls.length, 1)
+  assert.equal(support.com.supported, true)
+  assert.equal(support.com.baseUrl, 'https://rdap.example/rdap')
+  assert.equal(support.test.supported, true)
+  assert.equal(support.test.baseUrl, 'http://rdap.test/rdap')
+  assert.equal(support.unknown.supported, false)
+  assert.match(support.unknown.errorMessage ?? '', /No RDAP bootstrap service/)
 })
 
 test('RDAP classifies found, not found, unsupported, rate limited, and network errors', async () => {
@@ -172,13 +195,13 @@ test('RDAP verification updates available DNS results conservatively', () => {
   assert.ok(failed.confidenceReasons.some(reason => reason.includes('RDAP verification failed')))
 })
 
-test('domain check cache key differs when RDAP verification is enabled', () => {
+test('domain check cache key is DNS-only and independent from RDAP verification', () => {
   const off = buildDomainCheckCacheKey('Example', ['.COM'], false)
   const on = buildDomainCheckCacheKey(' example ', ['.com'], true)
 
   assert.equal(off.normalizedDomain, 'example')
   assert.deepEqual(off.sortedTLDs, ['.com'])
-  assert.notEqual(off.cacheKey, on.cacheKey)
-  assert.equal(off.cacheKey, 'example:.com:rdap=0')
-  assert.equal(on.cacheKey, 'example:.com:rdap=1')
+  assert.equal(off.cacheKey, on.cacheKey)
+  assert.equal(off.cacheKey, 'example:.com')
+  assert.equal(on.cacheKey, 'example:.com')
 })

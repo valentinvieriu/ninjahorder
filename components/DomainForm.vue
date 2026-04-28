@@ -134,33 +134,6 @@
       Select at least one TLD group.
     </div>
 
-    <div class="verification-panel">
-      <div class="verification-copy">
-        <p class="section-kicker">Optional verification</p>
-        <div class="verification-heading">
-          <h3>RDAP registry cross-check</h3>
-          <span
-            class="term-help"
-            tabindex="0"
-            title="Registration Data Access Protocol. Checks registry records after DNS suggests a name may be available."
-            aria-label="RDAP means Registration Data Access Protocol. It checks registry records for a domain after DNS suggests it may be available."
-            data-tip="Registration Data Access Protocol. Checks registry records after DNS suggests a name may be available."
-          >?</span>
-        </div>
-        <span>Runs only after DNS marks a domain as likely available.</span>
-      </div>
-      <label class="rdap-switch" :class="{ selected: verifyWithRdap }">
-        <input
-          type="checkbox"
-          v-model="verifyWithRdap"
-          aria-label="Verify likely available domains with RDAP"
-        />
-        <span class="switch-track" aria-hidden="true">
-          <span class="switch-thumb"></span>
-        </span>
-        <span class="switch-state">{{ verifyWithRdap ? 'On' : 'Off' }}</span>
-      </label>
-    </div>
   </form>
 </template>
 
@@ -174,7 +147,6 @@ const props = defineProps<{
     popularTLDs: boolean
     countryTLDs: boolean
     customTLDs: boolean
-    verifyWithRdap: boolean
   }
 }>()
 
@@ -184,7 +156,6 @@ const domain = ref(props.initialData.domain)
 const popularTLDsChecked = ref(props.initialData.popularTLDs)
 const countryTLDsChecked = ref(props.initialData.countryTLDs)
 const customTLDsChecked = ref(props.initialData.customTLDs)
-const verifyWithRdap = ref(props.initialData.verifyWithRdap)
 const domainError = ref('')
 
 watch(() => props.initialData, (newValue) => {
@@ -192,7 +163,6 @@ watch(() => props.initialData, (newValue) => {
   popularTLDsChecked.value = newValue.popularTLDs
   countryTLDsChecked.value = newValue.countryTLDs
   customTLDsChecked.value = newValue.customTLDs
-  verifyWithRdap.value = newValue.verifyWithRdap
   validateDomain()
 }, { deep: true })
 
@@ -256,8 +226,7 @@ const handleSubmit = () => {
 
   emit('submit', {
     domain: domain.value.trim(),
-    tlds: uniqueTLDs,
-    verifyWithRdap: verifyWithRdap.value
+    tlds: uniqueTLDs
   })
 }
 
@@ -288,7 +257,6 @@ const handleReset = () => {
 .search-row,
 .tld-panel,
 .selection-header,
-.verification-panel,
 .error-line {
   position: relative;
 }
@@ -401,14 +369,10 @@ h2 {
   text-transform: uppercase;
 }
 
-.selection-header h3,
-.verification-heading {
+.selection-header h3 {
   display: flex;
   align-items: center;
   gap: 7px;
-}
-
-.verification-copy h3 {
   margin: 0;
   color: var(--nh-text);
   font-size: 0.98rem;
@@ -539,8 +503,7 @@ h2 {
   opacity: 0.72;
 }
 
-.tld-toggle input,
-.rdap-switch input {
+.tld-toggle input {
   position: absolute;
   inset: 0;
   z-index: 3;
@@ -664,101 +627,6 @@ h2 {
     inset 0 1px 0 oklch(100% 0 0 / 0.22);
 }
 
-.verification-panel {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  margin-top: 12px;
-  padding: 13px;
-  border: 1px solid oklch(82% 0.16 78 / 0.28);
-  border-radius: var(--nh-radius);
-  background:
-    linear-gradient(90deg, oklch(82% 0.16 78 / 0.13), transparent 58%),
-    oklch(8% 0.035 260 / 0.34);
-  box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.13);
-}
-
-.verification-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.verification-copy > span {
-  color: oklch(82% 0.04 245 / 0.82);
-  font-size: 0.8rem;
-  font-weight: 700;
-  line-height: 1.35;
-}
-
-.rdap-switch {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  flex: 0 0 auto;
-  min-height: 40px;
-  padding: 6px 9px;
-  border: 1px solid oklch(100% 0 0 / 0.16);
-  border-radius: 999px;
-  background: oklch(100% 0 0 / 0.08);
-  cursor: pointer;
-}
-
-.switch-track {
-  position: relative;
-  width: 44px;
-  height: 24px;
-  border: 1px solid oklch(100% 0 0 / 0.16);
-  border-radius: 999px;
-  background: oklch(6% 0.035 260 / 0.50);
-}
-
-.switch-thumb {
-  position: absolute;
-  left: 3px;
-  top: 3px;
-  width: 16px;
-  height: 16px;
-  border-radius: 999px;
-  background: oklch(82% 0.04 245 / 0.76);
-  transition: transform 180ms ease, background 180ms ease, box-shadow 180ms ease;
-}
-
-.switch-state {
-  min-width: 24px;
-  color: var(--nh-muted);
-  font-size: 0.75rem;
-  font-weight: 900;
-}
-
-.rdap-switch.selected {
-  border-color: oklch(82% 0.16 78 / 0.52);
-  background: oklch(82% 0.16 78 / 0.12);
-}
-
-.rdap-switch.selected .switch-track {
-  border-color: oklch(82% 0.16 78 / 0.46);
-  background: oklch(82% 0.16 78 / 0.22);
-}
-
-.rdap-switch.selected .switch-thumb {
-  transform: translateX(20px);
-  background: var(--nh-amber);
-  box-shadow: 0 0 16px var(--nh-amber);
-}
-
-.rdap-switch.selected .switch-state {
-  color: oklch(91% 0.11 78);
-}
-
-.rdap-switch:focus-within {
-  outline: none;
-  border-color: oklch(82% 0.16 78 / 0.74);
-  box-shadow: 0 0 0 3px oklch(82% 0.16 78 / 0.18);
-}
-
 .error-line {
   margin-top: 9px;
   color: oklch(83% 0.15 35);
@@ -784,14 +652,9 @@ h2 {
     grid-template-columns: 1fr;
   }
 
-  .selection-header,
-  .verification-panel {
+  .selection-header {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .rdap-switch {
-    width: fit-content;
   }
 }
 </style>

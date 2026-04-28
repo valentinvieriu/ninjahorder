@@ -15,10 +15,6 @@ import {
   ErrorCategory,
   type DohProvider
 } from './domain';
-import {
-  applyRdapVerification,
-  checkRdapDomain,
-} from './domain/rdap';
 
 // Import constants from config
 import { ACTIVE_DOH_PROVIDERS } from '../config/appConfig';
@@ -28,7 +24,6 @@ interface DomainCheckRequest {
   domainName: string;
   tlds: string[];
   concurrencyLimit?: number; // Optional concurrency limit parameter
-  verifyWithRdap?: boolean;
 }
 
 // Use imported ProgressState for progress messages
@@ -163,7 +158,7 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort'
   }
 
   // Initialize state
-  const { domainName, tlds, concurrencyLimit = 5, verifyWithRdap = false } = event.data as DomainCheckRequest;
+  const { domainName, tlds, concurrencyLimit = 5 } = event.data as DomainCheckRequest;
   let domainsProcessed = 0;
   const totalDomains = tlds.length;
   const abortController = new AbortController();
@@ -237,21 +232,6 @@ self.onmessage = async (event: MessageEvent<DomainCheckRequest | { type: 'abort'
             });
           }
         );
-
-        if (verifyWithRdap && result.status === DomainAvailabilityStatus.AVAILABLE) {
-          postProgress({
-            percentage: Math.round(((domainsProcessed + 0.85) / totalDomains) * 100),
-            stage: CheckStage.RDAP_QUERY,
-            domainsProcessed,
-            totalDomains,
-            currentDomain: fullDomain,
-            providers: getProviderProgress(result),
-            detailedMessage: `Verifying registry data for ${fullDomain}...`
-          });
-
-          const rdapVerification = await checkRdapDomain(fullDomain, { signal });
-          result = applyRdapVerification(result, rdapVerification);
-        }
 
         // Post single result immediately
         if (!signal.aborted) {

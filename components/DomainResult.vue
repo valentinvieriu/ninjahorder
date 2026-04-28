@@ -24,6 +24,17 @@
     <div class="result-actions">
       <span class="status-badge" :class="statusBadgeClass">{{ statusText }}</span>
 
+      <button
+        v-if="showRdapAction"
+        type="button"
+        class="rdap-action"
+        :disabled="rdapChecking"
+        :aria-label="`Verify ${result.domain} with RDAP`"
+        @click="emit('verifyRdap', result.domain)"
+      >
+        {{ rdapChecking ? 'Checking RDAP' : 'Verify RDAP' }}
+      </button>
+
       <div class="info-wrap">
         <button type="button" class="info-button" aria-label="Show DNS evidence">
           i
@@ -95,6 +106,8 @@ import { computed, ref, onMounted } from 'vue'
 import { DomainAvailabilityStatus } from '~/composables/useDomainCheck'
 
 const props = defineProps<{
+  rdapChecking?: boolean
+  showRdapAction?: boolean
   result: {
     domain: string
     status: DomainAvailabilityStatus
@@ -115,6 +128,10 @@ const props = defineProps<{
       domainStatuses?: string[]
     }
   }
+}>()
+
+const emit = defineEmits<{
+  verifyRdap: [domain: string]
 }>()
 
 const isNew = ref(true)
@@ -194,7 +211,7 @@ const statusText = computed(() => {
 
   switch (props.result.status) {
     case DomainAvailabilityStatus.AVAILABLE:
-      return 'Likely Available — Verify'
+      return 'Likely Available'
     case DomainAvailabilityStatus.REGISTERED:
       return 'Registered'
     case DomainAvailabilityStatus.PREMIUM:
@@ -347,6 +364,7 @@ const buttonText = computed(() => {
 
 .status-badge,
 .action-link,
+.rdap-action,
 .info-button {
   min-height: 32px;
   border-radius: var(--nh-radius);
@@ -388,6 +406,25 @@ const buttonText = computed(() => {
 
 .info-button:hover {
   background: oklch(100% 0 0 / 0.15);
+}
+
+.rdap-action {
+  padding: 0 10px;
+  border: 1px solid oklch(82% 0.16 78 / 0.38);
+  color: oklch(91% 0.11 78);
+  background: oklch(82% 0.16 78 / 0.10);
+  white-space: nowrap;
+}
+
+.rdap-action:hover:not(:disabled) {
+  color: var(--nh-text);
+  border-color: oklch(82% 0.16 78 / 0.58);
+  background: oklch(82% 0.16 78 / 0.16);
+}
+
+.rdap-action:disabled {
+  cursor: wait;
+  opacity: 0.64;
 }
 
 .evidence-tooltip {

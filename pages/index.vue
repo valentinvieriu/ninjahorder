@@ -191,8 +191,79 @@
       </div>
 
       <div v-if="filteredGroups.available.length > 0" class="result-group">
-        <h3>Likely Available — Verify <span>{{ filteredGroups.available.length }}</span></h3>
-        <DomainResult v-for="result in filteredGroups.available" :key="result.domain" :result="result" />
+        <div class="result-group-header">
+          <h3>Likely Available <span>{{ filteredGroups.available.length }}</span></h3>
+          <span v-if="rdapSupportLoading" class="rdap-support-note">Checking RDAP support</span>
+          <span v-else-if="rdapUnsupportedCandidateCount > 0" class="rdap-support-note">
+            {{ rdapUnsupportedCandidateCount }} without RDAP
+          </span>
+          <button
+            v-if="rdapCandidateResults.length > 0"
+            type="button"
+            class="rdap-group-action"
+            :disabled="isChecking || isRdapBatchChecking"
+            @click="handleVerifyAllRdap"
+          >
+            {{ rdapGroupActionLabel }}
+          </button>
+        </div>
+
+        <div
+          v-if="pendingRdapIntent?.type === 'batch'"
+          class="rdap-privacy-panel rdap-batch-privacy"
+          role="alertdialog"
+          aria-label="RDAP privacy check"
+        >
+          <div>
+            <p class="console-label">RDAP privacy check</p>
+            <strong>Registry lookup leaves DNS-only mode</strong>
+            <span>
+              RDAP sends {{ pendingRdapDomainCount }} exact domain{{ pendingRdapDomainCount === 1 ? '' : 's' }}
+              to the matching registry service. The operator may log the domain, your IP address, timestamp,
+              and request metadata.
+            </span>
+          </div>
+          <div class="rdap-privacy-actions">
+            <button type="button" class="rdap-privacy-primary" @click="confirmRdapPrivacy">
+              Continue
+            </button>
+            <button type="button" class="rdap-privacy-secondary" @click="cancelRdapPrivacy">
+              Cancel
+            </button>
+          </div>
+        </div>
+
+        <template v-for="result in filteredGroups.available" :key="result.domain">
+          <DomainResult
+            :result="result"
+            :show-rdap-action="canVerifyRdap(result)"
+            :rdap-checking="isRdapPending(result.domain)"
+            @verify-rdap="handleVerifyRdap"
+          />
+          <div
+            v-if="isRdapPrivacyPromptFor(result.domain)"
+            class="rdap-privacy-panel rdap-row-privacy"
+            role="alertdialog"
+            aria-label="RDAP privacy check"
+          >
+            <div>
+              <p class="console-label">RDAP privacy check</p>
+              <strong>Registry lookup leaves DNS-only mode</strong>
+              <span>
+                RDAP sends {{ result.domain }} to the matching registry service. The operator may log
+                the domain, your IP address, timestamp, and request metadata.
+              </span>
+            </div>
+            <div class="rdap-privacy-actions">
+              <button type="button" class="rdap-privacy-primary" @click="confirmRdapPrivacy">
+                Continue
+              </button>
+              <button type="button" class="rdap-privacy-secondary" @click="cancelRdapPrivacy">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </template>
       </div>
       <div v-if="filteredGroups.premium.length > 0" class="result-group">
         <h3>Premium Signals <span>{{ filteredGroups.premium.length }}</span></h3>
@@ -211,26 +282,40 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useDomainCheck, stageMessages, CheckStage, DomainAvailabilityStatus } from '~/composables/useDomainCheck'
-import type { DomainResult } from '~/composables/domain'
+import { getRdapRootTld, getRdapSupportForRootTlds, type DomainResult, type RdapSupport } from '~/composables/domain'
 import { ACTIVE_DOH_PROVIDER_KEYS, PROVIDERS } from '~/config/appConfig'
 import { popularTLDs, countryTLDs, customTLDs } from '~/utils/tlds'
 
-const { checkDomains, groupedResults, progress, isChecking, cancelCheck } = useDomainCheck()
+const { checkDomains, verifyDomainWithRdap, groupedResults, progress, isChecking, cancelCheck } = useDomainCheck()
 const results = groupedResults
 const wasCancelled = ref(false)
 type StatusFilter = 'all' | 'needs_review' | DomainAvailabilityStatus.AVAILABLE | DomainAvailabilityStatus.REGISTERED | DomainAvailabilityStatus.PREMIUM
 type TldFilter = 'all' | 'popular' | 'country' | 'modern'
+type RdapIntent = { type: 'single' | 'batch', domains: string[] }
 
 const resultSearch = ref('')
 const statusFilter = ref<StatusFilter>('all')
 const tldFilter = ref<TldFilter>('all')
+const rdapPendingDomains = ref<Set<string>>(new Set())
+const rdapPrivacyAcknowledged = ref(false)
+const pendingRdapIntent = ref<RdapIntent | null>(null)
+const isRdapBatchChecking = ref(false)
+const rdapSupportByRootTld = ref<Record<string, RdapSupport>>({})
+const rdapSupportLoading = ref(false)
+let rdapSupportRequestId = 0
 const popularTldSet = new Set(popularTLDs)
 const countryTldSet = new Set(countryTLDs)
 const customTldSet = new Set(customTLDs)
 const knownTlds = Array.from(new Set([...popularTLDs, ...countryTLDs, ...customTLDs]))
   .sort((a, b) => b.length - a.length)
+const RDAP_BATCH_CONCURRENCY = 2
+const RDAP_PRIVACY_ACK_KEY = 'ninjahorder:rdap-privacy-acknowledged'
+
+onMounted(() => {
+  rdapPrivacyAcknowledged.value = localStorage.getItem(RDAP_PRIVACY_ACK_KEY) === '1'
+})
 
 watch(() => progress.value.stage, (newStage) => {
   if (newStage === CheckStage.CANCELLED) {
@@ -256,7 +341,6 @@ const initialFormData = ref({
   popularTLDs: true,
   countryTLDs: false,
   customTLDs: false,
-  verifyWithRdap: false,
 })
 
 const allResults = computed<DomainResult[]>(() => [
@@ -265,6 +349,42 @@ const allResults = computed<DomainResult[]>(() => [
   ...results.value.notAvailable,
   ...results.value.other,
 ])
+
+const resultRootTlds = computed(() =>
+  Array.from(new Set(
+    allResults.value
+      .map(result => getRdapRootTld(result.domain))
+      .filter((rootTld): rootTld is string => Boolean(rootTld))
+  )).sort()
+)
+
+const resultRootTldKey = computed(() => resultRootTlds.value.join(','))
+
+watch(resultRootTldKey, async (rootTldKey) => {
+  const rootTlds = rootTldKey ? rootTldKey.split(',') : []
+
+  if (rootTlds.length === 0) {
+    rdapSupportByRootTld.value = {}
+    rdapSupportLoading.value = false
+    return
+  }
+
+  const missingRootTlds = rootTlds.filter(rootTld => !rdapSupportByRootTld.value[rootTld])
+  if (missingRootTlds.length === 0) return
+
+  const requestId = ++rdapSupportRequestId
+  rdapSupportLoading.value = true
+
+  const supportByRootTld = await getRdapSupportForRootTlds(missingRootTlds)
+
+  if (requestId !== rdapSupportRequestId) return
+
+  rdapSupportByRootTld.value = {
+    ...rdapSupportByRootTld.value,
+    ...supportByRootTld,
+  }
+  rdapSupportLoading.value = false
+})
 
 const totalResults = computed(() => allResults.value.length)
 
@@ -330,6 +450,43 @@ const filteredGroups = computed(() => ({
   ),
 }))
 
+const getResultRootTld = (result: DomainResult) => getRdapRootTld(result.domain)
+
+const getRdapSupport = (result: DomainResult) => {
+  const rootTld = getResultRootTld(result)
+  return rootTld ? rdapSupportByRootTld.value[rootTld] : undefined
+}
+
+const isRdapSupported = (result: DomainResult) =>
+  getRdapSupport(result)?.supported === true
+
+const rdapCandidateResults = computed(() =>
+  filteredGroups.value.available.filter(result =>
+    !result.rdapVerification &&
+    isRdapSupported(result)
+  )
+)
+
+const rdapUnsupportedCandidateCount = computed(() =>
+  filteredGroups.value.available.filter(result => {
+    const support = getRdapSupport(result)
+    return !result.rdapVerification && support && !support.supported
+  }).length
+)
+
+const pendingRdapDomainCount = computed(() => pendingRdapIntent.value?.domains.length ?? 0)
+
+const rdapGroupActionLabel = computed(() => {
+  if (isRdapBatchChecking.value) return 'Checking RDAP'
+
+  const candidateCount = rdapCandidateResults.value.length
+  if (candidateCount === filteredGroups.value.available.length) {
+    return 'Verify all with RDAP'
+  }
+
+  return `Verify ${candidateCount} with RDAP`
+})
+
 const countStatus = (filter: StatusFilter) =>
   allResults.value.filter(result => matchesStatusFilter(result, filter)).length
 
@@ -390,8 +547,115 @@ const providerStatusClass = (provider: { status: string }) => {
   }
 }
 
-const handleSubmit = async (data: { domain: string, tlds: string[], verifyWithRdap: boolean }) => {
-  await checkDomains(data.domain, data.tlds, { verifyWithRdap: data.verifyWithRdap })
+const canVerifyRdap = (result: DomainResult) =>
+  !isChecking.value &&
+  result.status === DomainAvailabilityStatus.AVAILABLE &&
+  !result.rdapVerification &&
+  isRdapSupported(result)
+
+const isRdapPending = (domain: string) => rdapPendingDomains.value.has(domain)
+
+const isRdapPrivacyPromptFor = (domain: string) =>
+  pendingRdapIntent.value?.type === 'single' &&
+  pendingRdapIntent.value.domains.includes(domain)
+
+const setRdapPending = (domain: string, pending: boolean) => {
+  const nextPendingDomains = new Set(rdapPendingDomains.value)
+
+  if (pending) {
+    nextPendingDomains.add(domain)
+  } else {
+    nextPendingDomains.delete(domain)
+  }
+
+  rdapPendingDomains.value = nextPendingDomains
+}
+
+const runRdapIntent = async (intent: RdapIntent) => {
+  const queue = Array.from(new Set(intent.domains))
+    .filter(domain => {
+      const result = allResults.value.find(candidate => candidate.domain === domain)
+      return result && canVerifyRdap(result) && !isRdapPending(domain)
+    })
+
+  if (queue.length === 0) return
+
+  if (intent.type === 'batch') {
+    isRdapBatchChecking.value = true
+  }
+
+  try {
+    const workerCount = Math.min(RDAP_BATCH_CONCURRENCY, queue.length)
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (queue.length > 0) {
+        const domain = queue.shift()
+        if (!domain) return
+
+        setRdapPending(domain, true)
+
+        try {
+          await verifyDomainWithRdap(domain)
+        } catch (error) {
+          console.error(`[RDAP] Verification failed for ${domain}:`, error)
+        } finally {
+          setRdapPending(domain, false)
+        }
+      }
+    })
+
+    await Promise.all(workers)
+  } finally {
+    if (intent.type === 'batch') {
+      isRdapBatchChecking.value = false
+    }
+  }
+}
+
+const requestRdapVerification = (intent: RdapIntent) => {
+  if (intent.domains.length === 0) return
+
+  if (!rdapPrivacyAcknowledged.value) {
+    pendingRdapIntent.value = intent
+    return
+  }
+
+  void runRdapIntent(intent)
+}
+
+const handleVerifyRdap = (domain: string) => {
+  const result = allResults.value.find(candidate => candidate.domain === domain)
+  if (!result || !canVerifyRdap(result)) return
+
+  requestRdapVerification({ type: 'single', domains: [domain] })
+}
+
+const handleVerifyAllRdap = () => {
+  requestRdapVerification({
+    type: 'batch',
+    domains: rdapCandidateResults.value.map(result => result.domain)
+  })
+}
+
+const confirmRdapPrivacy = () => {
+  rdapPrivacyAcknowledged.value = true
+  localStorage.setItem(RDAP_PRIVACY_ACK_KEY, '1')
+  const intent = pendingRdapIntent.value
+  pendingRdapIntent.value = null
+
+  if (intent) {
+    void runRdapIntent(intent)
+  }
+}
+
+const cancelRdapPrivacy = () => {
+  pendingRdapIntent.value = null
+}
+
+const handleSubmit = async (data: { domain: string, tlds: string[] }) => {
+  pendingRdapIntent.value = null
+  rdapPendingDomains.value = new Set()
+  isRdapBatchChecking.value = false
+  await checkDomains(data.domain, data.tlds)
 }
 
 const handleCancel = () => {
@@ -968,11 +1232,19 @@ const handleCancel = () => {
   margin-top: 16px;
 }
 
+.result-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
 .result-group h3 {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 10px;
+  margin: 0;
   color: var(--nh-muted);
   font-size: 0.86rem;
   font-weight: 900;
@@ -989,6 +1261,111 @@ const handleCancel = () => {
   background: oklch(100% 0 0 / 0.08);
   font-size: 0.72rem;
   text-align: center;
+}
+
+.rdap-group-action,
+.rdap-support-note,
+.rdap-privacy-primary,
+.rdap-privacy-secondary {
+  min-height: 34px;
+  border-radius: var(--nh-radius);
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.rdap-support-note {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  padding: 0 10px;
+  border: 1px solid oklch(100% 0 0 / 0.14);
+  color: oklch(82% 0.04 245 / 0.86);
+  background: oklch(100% 0 0 / 0.06);
+}
+
+.rdap-group-action {
+  flex: 0 0 auto;
+  padding: 0 11px;
+  border: 1px solid oklch(82% 0.16 78 / 0.38);
+  color: oklch(91% 0.11 78);
+  background: oklch(82% 0.16 78 / 0.10);
+}
+
+.rdap-group-action:hover:not(:disabled),
+.rdap-privacy-primary:hover,
+.rdap-privacy-secondary:hover {
+  color: var(--nh-text);
+  border-color: oklch(82% 0.16 78 / 0.58);
+  background: oklch(82% 0.16 78 / 0.16);
+}
+
+.rdap-group-action:disabled {
+  cursor: wait;
+  opacity: 0.64;
+}
+
+.rdap-privacy-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 10px;
+  padding: 13px;
+  border: 1px solid oklch(82% 0.16 78 / 0.34);
+  border-radius: var(--nh-radius);
+  color: var(--nh-muted);
+  background:
+    linear-gradient(90deg, oklch(82% 0.16 78 / 0.12), transparent 62%),
+    oklch(8% 0.035 260 / 0.34);
+}
+
+.rdap-batch-privacy {
+  margin-top: -2px;
+}
+
+.rdap-row-privacy {
+  margin-top: -2px;
+  margin-bottom: 9px;
+  border-color: oklch(83% 0.145 205 / 0.54);
+  background:
+    linear-gradient(90deg, oklch(83% 0.145 205 / 0.13), transparent 62%),
+    oklch(8% 0.035 260 / 0.38);
+}
+
+.rdap-privacy-panel strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--nh-text);
+  font-size: 0.95rem;
+}
+
+.rdap-privacy-panel span {
+  display: block;
+  max-width: 760px;
+  color: oklch(84% 0.04 245 / 0.84);
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.rdap-privacy-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.rdap-privacy-primary {
+  padding: 0 12px;
+  border: 1px solid oklch(82% 0.16 78 / 0.44);
+  color: oklch(12% 0.04 260);
+  background: linear-gradient(135deg, var(--nh-amber), var(--nh-cyan));
+}
+
+.rdap-privacy-secondary {
+  padding: 0 12px;
+  border: 1px solid oklch(100% 0 0 / 0.16);
+  color: var(--nh-muted);
+  background: oklch(100% 0 0 / 0.07);
 }
 
 @keyframes meter-pulse {
@@ -1042,6 +1419,25 @@ const handleCancel = () => {
 
   .result-filters {
     grid-template-columns: 1fr;
+  }
+
+  .result-group-header,
+  .rdap-privacy-panel {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .result-group-header,
+  .rdap-privacy-actions {
+    flex-direction: column;
+  }
+
+  .rdap-group-action,
+  .rdap-support-note,
+  .rdap-privacy-actions,
+  .rdap-privacy-primary,
+  .rdap-privacy-secondary {
+    width: 100%;
   }
 
   .domain-counter,

@@ -11,6 +11,13 @@ interface RdapBootstrap {
   services?: Array<[string[], string[]]>
 }
 
+export interface RdapSupport {
+  rootTld: string
+  supported: boolean
+  baseUrl?: string
+  errorMessage?: string
+}
+
 interface RdapDomainResponse {
   objectClassName?: string
   ldhName?: string
@@ -70,6 +77,48 @@ export const resolveRdapBaseUrl = (bootstrap: RdapBootstrap, rootTld: string): s
 export const buildRdapDomainUrl = (baseUrl: string, domain: string): string => {
   const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
   return `${normalizedBase}domain/${encodeURIComponent(domain.toLowerCase())}`
+}
+
+export const getRdapSupportForRootTlds = async (
+  rootTlds: string[],
+  options: { signal?: AbortSignal } = {}
+): Promise<Record<string, RdapSupport>> => {
+  const normalizedRootTlds = Array.from(new Set(
+    rootTlds
+      .map(tld => tld.toLowerCase().replace(/^\.+/, '').trim())
+      .filter(Boolean)
+  ))
+
+  if (normalizedRootTlds.length === 0) return {}
+
+  try {
+    const bootstrap = await fetchBootstrap(options.signal)
+
+    return Object.fromEntries(normalizedRootTlds.map(rootTld => {
+      const baseUrl = resolveRdapBaseUrl(bootstrap, rootTld)
+
+      return [
+        rootTld,
+        {
+          rootTld,
+          supported: Boolean(baseUrl),
+          baseUrl: baseUrl ?? undefined,
+          errorMessage: baseUrl ? undefined : `No RDAP bootstrap service found for .${rootTld}.`,
+        }
+      ]
+    }))
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error)
+
+    return Object.fromEntries(normalizedRootTlds.map(rootTld => [
+      rootTld,
+      {
+        rootTld,
+        supported: false,
+        errorMessage: `RDAP bootstrap unavailable: ${errorMessage}`,
+      }
+    ]))
+  }
 }
 
 export const checkRdapDomain = async (

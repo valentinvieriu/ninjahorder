@@ -6,23 +6,23 @@ import {
   type ProgressState,
   type DomainResult,
   generateLink,
-  handleError,
-  type DohProvider
+  checkRdapDomain,
+  applyRdapVerification,
+  type RdapVerification
 } from './domain'
 import { buildDomainCheckCacheKey } from './domain/cache'
-import checkDomainAvailability from './domain/checker'
 
 // --- Re-export Enums and Types ---
 export { DomainAvailabilityStatus, ErrorCategory, CheckStage };
 export { buildDomainCheckCacheKey };
 
 // --- UI Messages ---
-// "Likely Available — Verify" rather than "Available": this app uses recursive
+// "Likely Available" rather than "Available": this app uses recursive
 // DNS only, which cannot prove registry availability (NXDOMAIN can hide
 // registered-but-undelegated, reserved, or premium names). The phrasing nudges
 // the user to confirm with a registrar/RDAP before acting.
 export const statusMessages = {
-  [DomainAvailabilityStatus.AVAILABLE]: 'Likely Available — Verify',
+  [DomainAvailabilityStatus.AVAILABLE]: 'Likely Available',
   [DomainAvailabilityStatus.REGISTERED]: 'Already Registered',
   [DomainAvailabilityStatus.PREMIUM]: 'Premium Domain',
   [DomainAvailabilityStatus.INDETERMINATE]: 'Status Uncertain',
@@ -49,6 +49,11 @@ interface CacheEntry {
   timestamp: number
 }
 
+interface RdapCacheEntry {
+  verification: RdapVerification
+  timestamp: number
+}
+
 interface GroupedResults {
   available: DomainResult[]
   notAvailable: DomainResult[]
@@ -56,9 +61,8 @@ interface GroupedResults {
   other: DomainResult[]
 }
 
-interface CheckDomainOptions {
-  verifyWithRdap?: boolean
-}
+const CACHE_TTL_MS = 5 * 60 * 1000
+const RDAP_CACHE_TTL_MS = 5 * 60 * 1000
 
 export const useDomainCheck = (options: { concurrency?: number } = {}) => {
   const results = reactive<DomainResult[]>([])
@@ -70,6 +74,7 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
   })
   const isChecking = ref(false)
   const cache = ref<Record<string, CacheEntry>>({})
+  const rdapCache = ref<Record<string, RdapCacheEntry>>({})
   let worker: Worker | null = null
   let abortController: AbortController | null = null
   let currentCacheKey: string | null = null
@@ -125,8 +130,7 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
 
   const checkDomains = async (
     domainName: string,
-    selectedTLDs: string[],
-    checkOptions: CheckDomainOptions = {}
+    selectedTLDs: string[]
   ) => {
     // Cancel any existing check
     if (isChecking.value) {
@@ -137,16 +141,14 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
     // same FQDNs in the worker. IDN/punycode is intentionally not handled here
     // — the form regex blocks non-ASCII labels today, and a punycode conversion
     // step belongs alongside a relaxed form validation.
-    const verifyWithRdap = Boolean(checkOptions.verifyWithRdap)
     const { cacheKey, normalizedDomain, sortedTLDs } = buildDomainCheckCacheKey(
       domainName,
-      selectedTLDs,
-      verifyWithRdap
+      selectedTLDs
     )
     currentCacheKey = cacheKey
     const cachedEntry = cache.value[cacheKey]
 
-    if (cachedEntry && Date.now() - cachedEntry.timestamp < 5 * 60 * 1000) {
+    if (cachedEntry && Date.now() - cachedEntry.timestamp < CACHE_TTL_MS) {
       results.splice(0, results.length, ...cachedEntry.results)
       console.info(`[Domain Check] Cache hit for ${normalizedDomain} with TLDs: ${sortedTLDs.join(',')}`)
       return groupedResults.value
@@ -342,8 +344,7 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
         worker.postMessage({
           domainName: normalizedDomain,
           tlds: sortedTLDs,
-          concurrencyLimit: concurrency,
-          verifyWithRdap
+          concurrencyLimit: concurrency
         })
       })
       // --- End of Worker Logic ---
@@ -375,8 +376,50 @@ export const useDomainCheck = (options: { concurrency?: number } = {}) => {
     }
   }
 
+  const verifyDomainWithRdap = async (domain: string): Promise<DomainResult | null> => {
+    const normalizedDomain = domain.trim().toLowerCase()
+    const existingIndex = results.findIndex(result => result.domain.toLowerCase() === normalizedDomain)
+
+    if (existingIndex === -1) return null
+
+    const existingResult = results[existingIndex]
+
+    if (
+      existingResult.status !== DomainAvailabilityStatus.AVAILABLE ||
+      existingResult.rdapVerification
+    ) {
+      return existingResult
+    }
+
+    const cachedEntry = rdapCache.value[normalizedDomain]
+    let verification = cachedEntry &&
+      Date.now() - cachedEntry.timestamp < RDAP_CACHE_TTL_MS
+        ? cachedEntry.verification
+        : null
+
+    if (!verification) {
+      verification = await checkRdapDomain(existingResult.domain)
+      rdapCache.value = {
+        ...rdapCache.value,
+        [normalizedDomain]: {
+          verification,
+          timestamp: Date.now()
+        }
+      }
+    }
+
+    const latestIndex = results.findIndex(result => result.domain.toLowerCase() === normalizedDomain)
+    if (latestIndex === -1) return null
+
+    const updatedResult = applyRdapVerification(results[latestIndex], verification)
+    results[latestIndex] = updatedResult
+
+    return updatedResult
+  }
+
   return {
     checkDomains,
+    verifyDomainWithRdap,
     cancelCheck,
     results,
     progress,
