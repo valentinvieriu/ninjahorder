@@ -2,19 +2,56 @@
   <div class="scan-page">
     <section class="hero-band">
       <div class="hero-copy">
-        <div class="brand-line">
-          <span class="brand-mark"></span>
-          NinjaHorder
+        <div class="hero-meta">
+          <div class="brand-line">
+            <span class="brand-mark"></span>
+            NinjaHorder
+          </div>
+          <div
+            class="hero-tagline term-help"
+            tabindex="0"
+            title="DNS checks query public resolver records. Fast and private, but not registrar-authoritative."
+            aria-label="DNS checks query public resolver records. They are fast and private, but not registrar-authoritative."
+            data-tip="DNS checks query public resolver records. Fast and private, but not registrar-authoritative."
+          >
+            DNS-only scouting
+          </div>
         </div>
         <h1>Private domain radar</h1>
         <p>
           Fast browser-side DNS scouting with multi-resolver evidence and no registrar lookup by default.
         </p>
       </div>
-      <div class="signal-strip" aria-hidden="true">
-        <span></span>
-        <span></span>
-        <span></span>
+      <div class="hero-console" aria-hidden="true">
+        <div class="radar-scope">
+          <span class="radar-ring ring-one"></span>
+          <span class="radar-ring ring-two"></span>
+          <span class="radar-ring ring-three"></span>
+          <span class="radar-sweep"></span>
+          <span class="radar-point point-one"></span>
+          <span class="radar-point point-two"></span>
+          <span class="radar-point point-three"></span>
+        </div>
+        <div class="hero-metrics">
+          <div>
+            <span>Resolvers</span>
+            <strong>{{ activeProviders.length }}</strong>
+          </div>
+          <div>
+            <span>Mode</span>
+            <strong>Local</strong>
+          </div>
+          <div>
+            <span>Lookup</span>
+            <strong
+              class="term-help"
+              tabindex="0"
+              title="Domain Name System evidence from public resolvers."
+              aria-label="DNS is the domain name system. This app checks DNS evidence before any registry lookup."
+              data-tip="Domain Name System evidence from public resolvers."
+            >DNS</strong>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -370,10 +407,44 @@ const handleCancel = () => {
 }
 
 .hero-band {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 24px;
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.42fr);
+  gap: 20px;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 18px 20px;
+  overflow: hidden;
+  border: 1px solid oklch(100% 0 0 / 0.12);
+  border-radius: calc(var(--nh-radius) + 2px);
+  background:
+    linear-gradient(135deg, oklch(9% 0.045 255 / 0.66), oklch(22% 0.075 270 / 0.34)),
+    linear-gradient(90deg, oklch(83% 0.145 205 / 0.10), transparent 55%);
+  box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.12);
+}
+
+.hero-band::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(115deg, transparent 0 22px, oklch(100% 0 0 / 0.05) 23px 24px),
+    linear-gradient(90deg, oklch(83% 0.145 205 / 0.09), transparent 42%, oklch(82% 0.16 78 / 0.06));
+  opacity: 0.5;
+}
+
+.hero-copy,
+.hero-console {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
   margin-bottom: 18px;
 }
 
@@ -381,7 +452,6 @@ const handleCancel = () => {
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  margin-bottom: 10px;
   color: var(--nh-cyan);
   font-size: 0.82rem;
   font-weight: 900;
@@ -397,11 +467,24 @@ const handleCancel = () => {
   box-shadow: 0 0 18px var(--nh-lime);
 }
 
+.hero-tagline {
+  display: inline-flex;
+  width: fit-content;
+  padding: 5px 9px;
+  border: 1px solid oklch(82% 0.16 78 / 0.34);
+  border-radius: 999px;
+  color: oklch(91% 0.11 78);
+  background: oklch(82% 0.16 78 / 0.10);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .hero-copy h1 {
   margin: 0;
   max-width: 680px;
   color: var(--nh-text);
-  font-size: clamp(2.25rem, 7vw, 5rem);
+  font-size: clamp(2.35rem, 5.7vw, 4.35rem);
   line-height: 0.96;
   letter-spacing: 0;
 }
@@ -414,32 +497,145 @@ const handleCancel = () => {
   line-height: 1.55;
 }
 
-.signal-strip {
+.hero-console {
   display: grid;
-  grid-template-columns: repeat(3, 42px);
-  gap: 8px;
-  padding-bottom: 10px;
+  grid-template-columns: minmax(154px, 1fr) 120px;
+  gap: 12px;
+  align-items: stretch;
+  min-height: 170px;
 }
 
-.signal-strip span {
-  height: 78px;
+.radar-scope,
+.hero-metrics {
   border: 1px solid oklch(100% 0 0 / 0.18);
   border-radius: var(--nh-radius);
+  background: oklch(6% 0.035 255 / 0.34);
+  box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.13);
+}
+
+.radar-scope {
+  position: relative;
+  min-height: 170px;
+  overflow: hidden;
   background:
-    linear-gradient(to top, oklch(83% 0.145 205 / 0.32), transparent),
-    oklch(100% 0 0 / 0.06);
-  box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.18);
-  animation: meter-pulse 1.8s ease-in-out infinite alternate;
+    linear-gradient(90deg, oklch(83% 0.145 205 / 0.10) 1px, transparent 1px),
+    linear-gradient(oklch(83% 0.145 205 / 0.08) 1px, transparent 1px),
+    oklch(6% 0.035 255 / 0.34);
+  background-size: 32px 32px;
 }
 
-.signal-strip span:nth-child(2) {
-  height: 108px;
-  animation-delay: 240ms;
+.radar-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border: 1px solid oklch(83% 0.145 205 / 0.24);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
 }
 
-.signal-strip span:nth-child(3) {
-  height: 62px;
-  animation-delay: 520ms;
+.ring-one { width: 68px; height: 68px; }
+.ring-two { width: 116px; height: 116px; }
+.ring-three { width: 166px; height: 166px; }
+
+.radar-sweep {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 84px;
+  height: 2px;
+  background: linear-gradient(90deg, var(--nh-cyan), transparent);
+  box-shadow: 0 0 18px oklch(83% 0.145 205 / 0.44);
+  transform-origin: left center;
+  animation: radar-scan 3.6s linear infinite;
+}
+
+.radar-point {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--nh-lime);
+  box-shadow: 0 0 18px var(--nh-lime);
+}
+
+.point-one { left: 66%; top: 28%; }
+.point-two { left: 34%; top: 61%; background: var(--nh-amber); box-shadow: 0 0 18px var(--nh-amber); }
+.point-three { left: 59%; top: 72%; background: var(--nh-cyan); box-shadow: 0 0 18px var(--nh-cyan); }
+
+.hero-metrics {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.hero-metrics div {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid oklch(100% 0 0 / 0.12);
+  border-radius: var(--nh-radius);
+  background: oklch(100% 0 0 / 0.07);
+}
+
+.hero-metrics span {
+  color: oklch(82% 0.04 245 / 0.78);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.hero-metrics strong {
+  color: var(--nh-text);
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.hero-metrics div:nth-child(2) strong {
+  color: oklch(91% 0.11 78);
+}
+
+.hero-metrics div:nth-child(3) strong {
+  color: oklch(90% 0.12 142);
+}
+
+.term-help {
+  position: relative;
+  z-index: 5;
+  cursor: help;
+}
+
+.term-help::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 9px);
+  z-index: 50;
+  width: min(260px, calc(100vw - 32px));
+  padding: 8px 9px;
+  border: 1px solid oklch(100% 0 0 / 0.18);
+  border-radius: var(--nh-radius);
+  color: var(--nh-text);
+  background: oklch(11% 0.04 255 / 0.96);
+  box-shadow: 0 16px 36px oklch(4% 0.035 260 / 0.42);
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.35;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(3px);
+  transition: opacity 150ms ease, transform 150ms ease, visibility 150ms ease;
+  text-transform: none;
+}
+
+.term-help:hover::after,
+.term-help:focus::after,
+.term-help:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
 }
 
 .notice-panel {
@@ -800,6 +996,11 @@ const handleCancel = () => {
   100% { opacity: 1; transform: translateY(-2px); }
 }
 
+@keyframes radar-scan {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
 @keyframes dot-pulse {
   0% { opacity: 0.55; transform: scale(0.86); }
   100% { opacity: 1; transform: scale(1.12); }
@@ -816,8 +1017,21 @@ const handleCancel = () => {
     grid-template-columns: 1fr;
   }
 
-  .signal-strip {
-    display: none;
+  .hero-band {
+    padding: 16px;
+  }
+
+  .hero-console {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .radar-scope {
+    min-height: 164px;
+  }
+
+  .hero-meta {
+    margin-bottom: 14px;
   }
 
   .console-header,
