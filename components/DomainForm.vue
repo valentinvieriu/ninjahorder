@@ -273,7 +273,7 @@ const handleReset = () => {
   margin: 0 0 3px;
   color: var(--nh-cyan);
   font-size: 0.72rem;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -282,6 +282,7 @@ h2 {
   margin: 0;
   color: var(--nh-text);
   font-size: clamp(1.12rem, 2vw, 1.45rem);
+  font-weight: 500;
   line-height: 1.15;
 }
 
@@ -293,7 +294,7 @@ h2 {
   padding-top: 4px;
   color: oklch(86% 0.055 205);
   font-size: 0.74rem;
-  font-weight: 800;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -315,7 +316,7 @@ h2 {
   height: 48px;
   padding: 0 42px 0 14px;
   font-size: 1.04rem;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .field-error {
@@ -334,7 +335,7 @@ h2 {
   border-radius: 999px;
   color: var(--nh-muted);
   background: oklch(100% 0 0 / 0.08);
-  font-weight: 800;
+  font-weight: 600;
   line-height: 1;
 }
 
@@ -347,7 +348,7 @@ h2 {
   min-width: 104px;
   height: 48px;
   padding: 0 18px;
-  font-weight: 900;
+  font-weight: 700;
   transition: transform 180ms ease, filter 180ms ease, opacity 180ms ease;
 }
 
@@ -365,7 +366,7 @@ h2 {
   margin: 0 0 3px;
   color: oklch(91% 0.11 78);
   font-size: 0.68rem;
-  font-weight: 900;
+  font-weight: 700;
   text-transform: uppercase;
 }
 
@@ -376,6 +377,7 @@ h2 {
   margin: 0;
   color: var(--nh-text);
   font-size: 0.98rem;
+  font-weight: 500;
   line-height: 1.15;
 }
 
@@ -392,7 +394,7 @@ h2 {
   color: oklch(91% 0.11 78);
   background: oklch(100% 0 0 / 0.07);
   font-size: 0.7rem;
-  font-weight: 900;
+  font-weight: 700;
   cursor: help;
 }
 
@@ -419,7 +421,7 @@ h2 {
   background: oklch(11% 0.04 255 / 0.96);
   box-shadow: 0 16px 36px oklch(4% 0.035 260 / 0.42);
   font-size: 0.72rem;
-  font-weight: 800;
+  font-weight: 600;
   line-height: 1.35;
   opacity: 0;
   visibility: hidden;
@@ -444,7 +446,7 @@ h2 {
   color: var(--nh-text);
   background: oklch(100% 0 0 / 0.08);
   font-size: 0.74rem;
-  font-weight: 900;
+  font-weight: 700;
 }
 
 .tld-panel {
@@ -524,13 +526,13 @@ h2 {
 .toggle-title {
   color: var(--nh-text);
   font-size: 1rem;
-  font-weight: 900;
+  font-weight: 700;
 }
 
 .tld-toggle small {
   color: oklch(82% 0.04 245 / 0.78);
   font-size: 0.78rem;
-  font-weight: 700;
+  font-weight: 500;
   line-height: 1.35;
 }
 
@@ -548,7 +550,7 @@ h2 {
   color: oklch(94% 0.03 245);
   background: color-mix(in oklch, var(--facet-accent), transparent 90%);
   font-size: 0.7rem;
-  font-weight: 900;
+  font-weight: 600;
 }
 
 .zone-count {
@@ -560,7 +562,7 @@ h2 {
   color: color-mix(in oklch, var(--facet-accent), white 24%);
   background: color-mix(in oklch, var(--facet-accent), transparent 88%);
   font-size: 0.74rem;
-  font-weight: 900;
+  font-weight: 600;
 }
 
 .toggle-indicator {
@@ -631,7 +633,7 @@ h2 {
   margin-top: 9px;
   color: oklch(83% 0.15 35);
   font-size: 0.84rem;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 @media (max-width: 640px) {

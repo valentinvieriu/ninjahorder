@@ -12,6 +12,7 @@
           <span v-if="result.dnssecValidated">DNSSEC AD</span>
           <span v-if="result.wildcardDetected">Wildcard DNS</span>
           <span v-if="result.rdapVerification">RDAP {{ rdapStatusLabel }}</span>
+          <span v-else-if="rdapSupportState === 'unsupported'">RDAP unsupported</span>
         </div>
       </div>
     </div>
@@ -23,6 +24,13 @@
 
     <div class="result-actions">
       <span class="status-badge" :class="statusBadgeClass">{{ statusText }}</span>
+      <span
+        v-if="evidenceBadge"
+        class="evidence-badge"
+        :class="evidenceBadge.variant"
+      >
+        {{ evidenceBadge.text }}
+      </span>
 
       <button
         v-if="showRdapAction"
@@ -43,29 +51,35 @@
         <div class="evidence-tooltip">
           <div class="tooltip-header">
             <strong>{{ result.domain }}</strong>
-            <span class="status-badge compact" :class="statusBadgeClass">{{ statusText }}</span>
+            <span class="status-badge compact" :class="statusBadgeClass">{{ tooltipStatusText }}</span>
+          </div>
+
+          <div class="decision-card" :class="decisionSummary.variant">
+            <span>Why this status</span>
+            <strong>{{ decisionSummary.status }}</strong>
+            <p>{{ decisionSummary.reason }}</p>
           </div>
 
           <div class="metric-grid">
-            <div>
-              <span>Status</span>
-              <strong>{{ statusText }}</strong>
-            </div>
-            <div>
+            <div class="metric-card" :class="metricCardClass('dnssec')">
               <span>DNSSEC</span>
               <strong>{{ result.dnssecValidated ? 'Validated' : 'Not validated' }}</strong>
+              <small v-if="decisionSignal === 'dnssec'">Deciding evidence</small>
             </div>
-            <div>
+            <div class="metric-card" :class="metricCardClass('wildcard')">
               <span>Wildcard</span>
               <strong>{{ result.wildcardDetected ? 'Detected' : 'Not detected' }}</strong>
+              <small v-if="decisionSignal === 'wildcard'">Deciding evidence</small>
             </div>
-            <div>
+            <div class="metric-card" :class="metricCardClass('parking')">
               <span>Parking</span>
               <strong>{{ isParkedDomain ? parkingType : 'Not detected' }}</strong>
+              <small v-if="decisionSignal === 'parking'">Deciding evidence</small>
             </div>
-            <div>
+            <div class="metric-card" :class="metricCardClass('rdap')">
               <span>RDAP</span>
-              <strong>{{ result.rdapVerification ? rdapStatusLabel : 'Not checked' }}</strong>
+              <strong>{{ rdapMetricText }}</strong>
+              <small v-if="decisionSignal === 'rdap'">Deciding evidence</small>
             </div>
           </div>
 
@@ -105,13 +119,17 @@
 import { computed, ref, onMounted } from 'vue'
 import { DomainAvailabilityStatus } from '~/composables/useDomainCheck'
 
+type RdapSupportState = 'checking' | 'supported' | 'unsupported' | 'unknown'
+
 const props = defineProps<{
   rdapChecking?: boolean
+  rdapSupportState?: RdapSupportState
   showRdapAction?: boolean
   result: {
     domain: string
     status: DomainAvailabilityStatus
     error: boolean
+    errorMessage?: string
     link: string
     confidenceReasons: string[]
     confidenceScore?: number
@@ -170,6 +188,22 @@ const rdapStatusLabel = computed(() => {
   }
 })
 
+const rdapMetricText = computed(() => {
+  if (props.result.rdapVerification) return rdapStatusLabel.value
+
+  switch (props.rdapSupportState) {
+    case 'checking':
+      return 'Checking support'
+    case 'supported':
+      return 'Supported, not checked'
+    case 'unsupported':
+      return 'Not supported for this TLD'
+    case 'unknown':
+    default:
+      return 'Not checked'
+  }
+})
+
 const domainLink = computed(() => {
   if (isParkedDomain.value && props.result.status === DomainAvailabilityStatus.REGISTERED) {
     return `https://domainr.com/${props.result.domain}`
@@ -205,6 +239,13 @@ const statusColorClass = computed(() => {
 const statusBadgeClass = computed(() => statusColorClass.value)
 
 const statusText = computed(() => {
+  if (
+    props.result.status === DomainAvailabilityStatus.REGISTERED &&
+    props.result.rdapVerification?.status === 'found'
+  ) {
+    return 'Registered via RDAP'
+  }
+
   if (props.result.status === DomainAvailabilityStatus.REGISTERED && isParkedDomain.value) {
     return 'Registered Parked'
   }
@@ -223,6 +264,219 @@ const statusText = computed(() => {
     default:
       return 'Unknown'
   }
+})
+
+const tooltipStatusText = computed(() => {
+  switch (props.result.rdapVerification?.status) {
+    case 'found':
+      return 'Registered via RDAP'
+    case 'not_found':
+      return 'Likely Available - RDAP not found'
+    case 'unsupported':
+      return 'Needs review - RDAP unsupported'
+    case 'rate_limited':
+      return 'Needs review - RDAP rate limited'
+    case 'error':
+      return 'Needs review - RDAP error'
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.AVAILABLE) {
+    if (props.rdapSupportState === 'unsupported') {
+      return 'Likely Available - DNS only'
+    }
+
+    if (props.rdapSupportState === 'supported') {
+      return 'Likely Available - RDAP available'
+    }
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.REGISTERED) {
+    if (isParkedDomain.value) {
+      return `Registered - parked ${parkingType.value} evidence`
+    }
+
+    return 'Registered - DNS evidence'
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.PREMIUM) {
+    return 'Premium - DNS/TXT signal'
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.INDETERMINATE) {
+    return 'Needs review - DNS inconclusive'
+  }
+
+  return statusText.value
+})
+
+const decisionSummary = computed(() => {
+  switch (props.result.rdapVerification?.status) {
+    case 'found':
+      return {
+        status: 'Registered',
+        reason: 'RDAP found a registry object. This is the evidence that changes the domain to registered.',
+        variant: 'rdap-registered',
+        signal: 'rdap',
+      }
+    case 'not_found':
+      return {
+        status: 'Likely Available',
+        reason: 'RDAP returned no registration object, so it supports the DNS availability signal.',
+        variant: 'rdap-clear',
+        signal: 'rdap',
+      }
+    case 'unsupported':
+      return {
+        status: 'Needs review',
+        reason: 'RDAP is unsupported for this TLD.',
+        variant: 'needs-review',
+        signal: 'rdap',
+      }
+    case 'rate_limited':
+      return {
+        status: 'Needs review',
+        reason: 'The RDAP service rate-limited the lookup.',
+        variant: 'needs-review',
+        signal: 'rdap',
+      }
+    case 'error':
+      return {
+        status: 'Needs review',
+        reason: 'The RDAP lookup failed.',
+        variant: 'needs-review',
+        signal: 'rdap',
+      }
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.REGISTERED) {
+    if (isParkedDomain.value) {
+      return {
+        status: 'Registered',
+        reason: `Parking evidence was detected from ${parkingType.value} records. That is the strongest registration signal.`,
+        variant: 'dns-registered',
+        signal: 'parking',
+      }
+    }
+
+    if (props.result.wildcardDetected) {
+      return {
+        status: 'Registered',
+        reason: 'Wildcard DNS answers were detected. That makes the DNS result unsafe to treat as available.',
+        variant: 'dns-registered',
+        signal: 'wildcard',
+      }
+    }
+
+    return {
+      status: 'Registered',
+      reason: 'DNS returned exact-domain existence evidence, such as NS, SOA, or record data.',
+      variant: 'dns-registered',
+      signal: 'dns',
+    }
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.AVAILABLE) {
+    if (props.rdapSupportState === 'unsupported') {
+      return {
+        status: 'Likely Available',
+        reason: 'DNS suggests availability; RDAP is not supported for this TLD.',
+        variant: 'dns-only',
+        signal: 'dns',
+      }
+    }
+
+    if (props.result.rdapVerification?.status === 'not_found') {
+      return {
+        status: 'Likely Available',
+        reason: 'DNS and RDAP both support the availability signal.',
+        variant: 'rdap-clear',
+        signal: 'rdap',
+      }
+    }
+
+    return {
+      status: 'Likely Available',
+      reason: 'DNS returned NXDOMAIN consensus.',
+      variant: 'dns-available',
+      signal: 'dns',
+    }
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.PREMIUM) {
+    return {
+      status: 'Premium Signal',
+      reason: 'DNS records contain premium or sales signals.',
+      variant: 'needs-review',
+      signal: 'dns',
+    }
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.INDETERMINATE) {
+    return {
+      status: 'Needs review',
+      reason: 'DNS evidence was incomplete or conflicted.',
+      variant: 'needs-review',
+      signal: 'dns',
+    }
+  }
+
+  return {
+    status: 'Error',
+    reason: props.result.errorMessage || 'The check failed before a reliable decision could be made.',
+    variant: 'needs-review',
+    signal: 'dns',
+  }
+})
+
+const decisionSignal = computed(() => decisionSummary.value.signal)
+
+const metricCardClass = (signal: string) => {
+  if (decisionSignal.value !== signal) return {}
+
+  return {
+    decisive: true,
+    [decisionSummary.value.variant]: true,
+  }
+}
+
+const evidenceBadge = computed(() => {
+  switch (props.result.rdapVerification?.status) {
+    case 'found':
+      return { text: 'RDAP found', variant: 'registered' }
+    case 'not_found':
+      return { text: 'RDAP clear', variant: 'verified' }
+    case 'unsupported':
+      return { text: 'RDAP unsupported', variant: 'unsupported' }
+    case 'rate_limited':
+      return { text: 'RDAP rate limit', variant: 'warning' }
+    case 'error':
+      return { text: 'RDAP error', variant: 'warning' }
+  }
+
+  if (
+    props.result.status === DomainAvailabilityStatus.AVAILABLE &&
+    props.rdapSupportState === 'unsupported'
+  ) {
+    return { text: 'DNS only', variant: 'unsupported' }
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.REGISTERED) {
+    if (isParkedDomain.value) {
+      return { text: 'Parked DNS', variant: 'warning' }
+    }
+
+    return { text: 'DNS found', variant: 'registered' }
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.PREMIUM) {
+    return { text: 'Premium signal', variant: 'warning' }
+  }
+
+  if (props.result.status === DomainAvailabilityStatus.INDETERMINATE) {
+    return { text: 'Needs review', variant: 'warning' }
+  }
+
+  return null
 })
 
 const formattedReasons = computed(() => {
@@ -291,6 +545,11 @@ const buttonText = computed(() => {
   -webkit-backdrop-filter: blur(18px) saturate(1.32);
 }
 
+.result-row:hover,
+.result-row:focus-within {
+  z-index: 45;
+}
+
 .result-main {
   display: flex;
   min-width: 0;
@@ -321,7 +580,7 @@ const buttonText = computed(() => {
   display: block;
   color: var(--nh-text);
   font-size: 1.02rem;
-  font-weight: 900;
+  font-weight: 700;
   overflow-wrap: anywhere;
 }
 
@@ -337,7 +596,7 @@ const buttonText = computed(() => {
 .parking-badges span {
   color: oklch(84% 0.04 245 / 0.82);
   font-size: 0.72rem;
-  font-weight: 800;
+  font-weight: 600;
 }
 
 .parking-badges {
@@ -364,12 +623,13 @@ const buttonText = computed(() => {
 
 .status-badge,
 .action-link,
+.evidence-badge,
 .rdap-action,
 .info-button {
   min-height: 32px;
   border-radius: var(--nh-radius);
   font-size: 0.76rem;
-  font-weight: 900;
+  font-weight: 700;
 }
 
 .status-badge {
@@ -383,6 +643,42 @@ const buttonText = computed(() => {
 .status-badge.compact {
   min-height: 24px;
   font-size: 0.7rem;
+}
+
+.tooltip-header .status-badge.compact {
+  justify-content: center;
+  max-width: 190px;
+  white-space: normal;
+  text-align: center;
+}
+
+.evidence-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border: 1px solid oklch(100% 0 0 / 0.16);
+  color: oklch(84% 0.04 245 / 0.86);
+  background: oklch(100% 0 0 / 0.07);
+  white-space: nowrap;
+}
+
+.evidence-badge.verified {
+  color: oklch(92% 0.10 142);
+  border-color: oklch(82% 0.17 142 / 0.30);
+  background: oklch(82% 0.17 142 / 0.10);
+}
+
+.evidence-badge.registered,
+.evidence-badge.warning {
+  color: oklch(91% 0.11 78);
+  border-color: oklch(82% 0.16 78 / 0.34);
+  background: oklch(82% 0.16 78 / 0.11);
+}
+
+.evidence-badge.unsupported {
+  color: oklch(86% 0.04 245);
+  border-color: oklch(100% 0 0 / 0.18);
+  background: oklch(100% 0 0 / 0.08);
 }
 
 .status-badge.available { color: oklch(90% 0.12 142); background: oklch(82% 0.17 142 / 0.12); border-color: oklch(82% 0.17 142 / 0.34); }
@@ -430,14 +726,14 @@ const buttonText = computed(() => {
 .evidence-tooltip {
   position: absolute;
   right: 0;
-  top: -10px;
+  top: calc(100% + 8px);
   z-index: 40;
   width: min(440px, calc(100vw - 32px));
   max-height: min(520px, 75vh);
   padding: 13px;
   overflow-y: auto;
-  transform: translateY(-100%) scale(0.98);
-  transform-origin: bottom right;
+  transform: scale(0.98);
+  transform-origin: top right;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -456,7 +752,7 @@ const buttonText = computed(() => {
 .info-wrap:focus-within .evidence-tooltip {
   opacity: 1;
   visibility: visible;
-  transform: translateY(-100%) scale(1);
+  transform: scale(1);
   pointer-events: auto;
 }
 
@@ -474,6 +770,78 @@ const buttonText = computed(() => {
   overflow-wrap: anywhere;
 }
 
+.decision-card {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid oklch(100% 0 0 / 0.16);
+  border-radius: var(--nh-radius);
+  background: oklch(100% 0 0 / 0.07);
+}
+
+.decision-card span {
+  display: block;
+  color: oklch(82% 0.04 245 / 0.76);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.decision-card strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--nh-text);
+  font-size: 1rem;
+}
+
+.decision-card p {
+  margin: 6px 0 0;
+  color: oklch(94% 0.02 245);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.decision-card.rdap-registered {
+  border-color: oklch(69% 0.19 25 / 0.50);
+  background:
+    linear-gradient(135deg, oklch(69% 0.19 25 / 0.24), transparent 58%),
+    oklch(100% 0 0 / 0.07);
+  box-shadow: inset 3px 0 0 var(--nh-rose);
+}
+
+.decision-card.dns-registered {
+  border-color: oklch(82% 0.16 78 / 0.46);
+  background:
+    linear-gradient(135deg, oklch(82% 0.16 78 / 0.20), transparent 58%),
+    oklch(100% 0 0 / 0.07);
+  box-shadow: inset 3px 0 0 var(--nh-amber);
+}
+
+.decision-card.rdap-clear,
+.decision-card.dns-available {
+  border-color: oklch(82% 0.17 142 / 0.42);
+  background:
+    linear-gradient(135deg, oklch(82% 0.17 142 / 0.18), transparent 58%),
+    oklch(100% 0 0 / 0.07);
+  box-shadow: inset 3px 0 0 var(--nh-lime);
+}
+
+.decision-card.dns-only {
+  border-color: oklch(100% 0 0 / 0.20);
+  background:
+    linear-gradient(135deg, oklch(100% 0 0 / 0.10), transparent 58%),
+    oklch(100% 0 0 / 0.06);
+  box-shadow: inset 3px 0 0 oklch(78% 0.03 245);
+}
+
+.decision-card.needs-review {
+  border-color: oklch(82% 0.16 78 / 0.48);
+  background:
+    linear-gradient(135deg, oklch(82% 0.16 78 / 0.20), transparent 58%),
+    oklch(100% 0 0 / 0.07);
+  box-shadow: inset 3px 0 0 var(--nh-amber);
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -481,7 +849,7 @@ const buttonText = computed(() => {
   margin-top: 10px;
 }
 
-.metric-grid div {
+.metric-card {
   min-width: 0;
   padding: 9px;
   border: 1px solid oklch(100% 0 0 / 0.12);
@@ -490,12 +858,13 @@ const buttonText = computed(() => {
 }
 
 .metric-grid span,
+.metric-card small,
 .tooltip-section-title,
 .tooltip-footer {
   display: block;
   color: oklch(82% 0.04 245 / 0.76);
   font-size: 0.72rem;
-  font-weight: 800;
+  font-weight: 600;
 }
 
 .metric-grid strong {
@@ -503,6 +872,41 @@ const buttonText = computed(() => {
   margin-top: 2px;
   font-size: 0.82rem;
   overflow-wrap: anywhere;
+}
+
+.metric-card small {
+  margin-top: 5px;
+  color: oklch(96% 0.02 245);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.metric-card.decisive {
+  background:
+    linear-gradient(135deg, oklch(100% 0 0 / 0.11), transparent 64%),
+    oklch(100% 0 0 / 0.08);
+}
+
+.metric-card.decisive.rdap-registered {
+  border-color: oklch(69% 0.19 25 / 0.58);
+  box-shadow: inset 3px 0 0 var(--nh-rose);
+}
+
+.metric-card.decisive.dns-registered,
+.metric-card.decisive.needs-review {
+  border-color: oklch(82% 0.16 78 / 0.56);
+  box-shadow: inset 3px 0 0 var(--nh-amber);
+}
+
+.metric-card.decisive.rdap-clear,
+.metric-card.decisive.dns-available {
+  border-color: oklch(82% 0.17 142 / 0.52);
+  box-shadow: inset 3px 0 0 var(--nh-lime);
+}
+
+.metric-card.decisive.dns-only {
+  border-color: oklch(100% 0 0 / 0.30);
+  box-shadow: inset 3px 0 0 oklch(78% 0.03 245);
 }
 
 .reason-list {
@@ -605,7 +1009,7 @@ const buttonText = computed(() => {
   .evidence-tooltip {
     left: 0;
     right: auto;
-    transform-origin: bottom left;
+    transform-origin: top left;
   }
 }
 </style>

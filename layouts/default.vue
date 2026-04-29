@@ -26,6 +26,9 @@
   --nh-glass-line: oklch(100% 0 0 / 0.16);
   --nh-shadow: 0 24px 80px oklch(5% 0.035 265 / 0.45);
   --nh-radius: 8px;
+  --nh-font-body: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Avenir Next", sans-serif;
+  --nh-font-display: "Avenir Next", "SF Pro Display", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --nh-font-quiet: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
 }
 
 html,
@@ -38,7 +41,9 @@ body,
 body {
   color: var(--nh-text);
   background: var(--nh-bg-ink);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--nh-font-body);
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+  text-rendering: optimizeLegibility;
 }
 
 * {

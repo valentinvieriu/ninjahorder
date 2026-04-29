@@ -13,7 +13,7 @@ export default defineNuxtConfig({
 
   app: {
     head: {
-      title: 'NinjaHorder - Your Private Domain Scout',
+      title: 'Ninja Hoarder - Private Domain Hunt',
       meta: [
         { name: 'viewport', content: 'width=device-width, initial-scale=1' },
         { charset: 'utf-8' },

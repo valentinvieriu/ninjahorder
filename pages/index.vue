@@ -5,51 +5,67 @@
         <div class="hero-meta">
           <div class="brand-line">
             <span class="brand-mark"></span>
-            NinjaHorder
+            Ninja Hoarder
           </div>
           <div
             class="hero-tagline term-help"
             tabindex="0"
-            title="DNS checks query public resolver records. Fast and private, but not registrar-authoritative."
-            aria-label="DNS checks query public resolver records. They are fast and private, but not registrar-authoritative."
-            data-tip="DNS checks query public resolver records. Fast and private, but not registrar-authoritative."
+            title="DNS checks query public resolver records before any optional registry lookup."
+            aria-label="DNS checks query public resolver records before any optional registry lookup."
+            data-tip="DNS checks query public resolver records before any optional registry lookup."
           >
-            DNS-only scouting
+            Private name hunt
           </div>
         </div>
-        <h1>Private domain radar</h1>
+        <h1>
+          <span>Find promising</span>
+          <span>domain names</span>
+          <span class="hero-quiet-wrap" aria-live="polite">
+            <span :key="heroPromiseWord" class="hero-quiet-word">{{ heroPromiseWord }}</span>
+          </span>
+        </h1>
         <p>
-          Fast browser-side DNS scouting with multi-resolver evidence and no registrar lookup by default.
+          Hunt for valuable names from your own browser. Ninja Hoarder keeps ideas off our servers
+          and asks before any outside check can reveal an exact domain.
         </p>
       </div>
       <div class="hero-console" aria-hidden="true">
-        <div class="radar-scope">
-          <span class="radar-ring ring-one"></span>
-          <span class="radar-ring ring-two"></span>
-          <span class="radar-ring ring-three"></span>
-          <span class="radar-sweep"></span>
-          <span class="radar-point point-one"></span>
-          <span class="radar-point point-two"></span>
-          <span class="radar-point point-three"></span>
+        <div class="stealth-vault">
+          <span class="vault-glow"></span>
+          <span class="vault-mask">
+            <span></span>
+          </span>
+          <span class="domain-token token-one">
+            <span :key="heroTokens[0]">{{ heroTokens[0] }}</span>
+          </span>
+          <span class="domain-token token-two">
+            <span :key="heroTokens[1]">{{ heroTokens[1] }}</span>
+          </span>
+          <span class="domain-token token-three">
+            <span :key="heroTokens[2]">{{ heroTokens[2] }}</span>
+          </span>
+          <span class="vault-line line-one"></span>
+          <span class="vault-line line-two"></span>
+          <span class="vault-line line-three"></span>
         </div>
         <div class="hero-metrics">
           <div>
-            <span>Resolvers</span>
-            <strong>{{ activeProviders.length }}</strong>
+            <span>Search</span>
+            <strong>Browser</strong>
           </div>
           <div>
-            <span>Mode</span>
-            <strong>Local</strong>
+            <span>Registrars</span>
+            <strong>Silent</strong>
           </div>
           <div>
-            <span>Lookup</span>
+            <span>Verify</span>
             <strong
               class="term-help"
               tabindex="0"
-              title="Domain Name System evidence from public resolvers."
-              aria-label="DNS is the domain name system. This app checks DNS evidence before any registry lookup."
-              data-tip="Domain Name System evidence from public resolvers."
-            >DNS</strong>
+              title="Registry checks are optional because they send the exact domain to the registry service."
+              aria-label="Registry checks are optional because they send the exact domain to the registry service."
+              data-tip="Registry checks are optional because they send the exact domain to the registry service."
+            >Ask first</strong>
           </div>
         </div>
       </div>
@@ -236,6 +252,7 @@
         <template v-for="result in filteredGroups.available" :key="result.domain">
           <DomainResult
             :result="result"
+            :rdap-support-state="getRdapSupportState(result)"
             :show-rdap-action="canVerifyRdap(result)"
             :rdap-checking="isRdapPending(result.domain)"
             @verify-rdap="handleVerifyRdap"
@@ -267,22 +284,37 @@
       </div>
       <div v-if="filteredGroups.premium.length > 0" class="result-group">
         <h3>Premium Signals <span>{{ filteredGroups.premium.length }}</span></h3>
-        <DomainResult v-for="result in filteredGroups.premium" :key="result.domain" :result="result" />
+        <DomainResult
+          v-for="result in filteredGroups.premium"
+          :key="result.domain"
+          :result="result"
+          :rdap-support-state="getRdapSupportState(result)"
+        />
       </div>
       <div v-if="filteredGroups.notAvailable.length > 0" class="result-group">
         <h3>Registered <span>{{ filteredGroups.notAvailable.length }}</span></h3>
-        <DomainResult v-for="result in filteredGroups.notAvailable" :key="result.domain" :result="result" />
+        <DomainResult
+          v-for="result in filteredGroups.notAvailable"
+          :key="result.domain"
+          :result="result"
+          :rdap-support-state="getRdapSupportState(result)"
+        />
       </div>
       <div v-if="filteredGroups.other.length > 0" class="result-group">
         <h3>Indeterminate / Error <span>{{ filteredGroups.other.length }}</span></h3>
-        <DomainResult v-for="result in filteredGroups.other" :key="result.domain" :result="result" />
+        <DomainResult
+          v-for="result in filteredGroups.other"
+          :key="result.domain"
+          :result="result"
+          :rdap-support-state="getRdapSupportState(result)"
+        />
       </div>
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useDomainCheck, stageMessages, CheckStage, DomainAvailabilityStatus } from '~/composables/useDomainCheck'
 import { getRdapRootTld, getRdapSupportForRootTlds, type DomainResult, type RdapSupport } from '~/composables/domain'
 import { ACTIVE_DOH_PROVIDER_KEYS, PROVIDERS } from '~/config/appConfig'
@@ -312,9 +344,41 @@ const knownTlds = Array.from(new Set([...popularTLDs, ...countryTLDs, ...customT
   .sort((a, b) => b.length - a.length)
 const RDAP_BATCH_CONCURRENCY = 2
 const RDAP_PRIVACY_ACK_KEY = 'ninjahorder:rdap-privacy-acknowledged'
+const heroTokenSets = [
+  ['.com', '.ai', '.app'],
+  ['.io', '.dev', '.shop'],
+  ['.co', '.xyz', '.studio'],
+]
+const heroPromiseWords = ['quietly', 'privately', 'locally', 'carefully']
+const heroTokenFrame = ref(0)
+const heroPromiseFrame = ref(0)
+const heroTokens = computed(() => heroTokenSets[heroTokenFrame.value % heroTokenSets.length])
+const heroPromiseWord = computed(() => heroPromiseWords[heroPromiseFrame.value % heroPromiseWords.length])
+let heroTokenTimer: ReturnType<typeof setInterval> | undefined
+let heroPromiseTimer: ReturnType<typeof setInterval> | undefined
 
 onMounted(() => {
   rdapPrivacyAcknowledged.value = localStorage.getItem(RDAP_PRIVACY_ACK_KEY) === '1'
+
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    heroTokenTimer = window.setInterval(() => {
+      heroTokenFrame.value = (heroTokenFrame.value + 1) % heroTokenSets.length
+    }, 2800)
+
+    heroPromiseTimer = window.setInterval(() => {
+      heroPromiseFrame.value = (heroPromiseFrame.value + 1) % heroPromiseWords.length
+    }, 3400)
+  }
+})
+
+onUnmounted(() => {
+  if (heroTokenTimer) {
+    clearInterval(heroTokenTimer)
+  }
+
+  if (heroPromiseTimer) {
+    clearInterval(heroPromiseTimer)
+  }
 })
 
 watch(() => progress.value.stage, (newStage) => {
@@ -459,6 +523,16 @@ const getRdapSupport = (result: DomainResult) => {
 
 const isRdapSupported = (result: DomainResult) =>
   getRdapSupport(result)?.supported === true
+
+const getRdapSupportState = (result: DomainResult) => {
+  const support = getRdapSupport(result)
+
+  if (support?.supported === true) return 'supported'
+  if (support?.supported === false) return 'unsupported'
+  if (result.status === DomainAvailabilityStatus.AVAILABLE && rdapSupportLoading.value) return 'checking'
+
+  return 'unknown'
+}
 
 const rdapCandidateResults = computed(() =>
   filteredGroups.value.available.filter(result =>
@@ -717,8 +791,9 @@ const handleCancel = () => {
   align-items: center;
   gap: 9px;
   color: var(--nh-cyan);
+  font-family: var(--nh-font-display);
   font-size: 0.82rem;
-  font-weight: 900;
+  font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0;
 }
@@ -739,26 +814,52 @@ const handleCancel = () => {
   border-radius: 999px;
   color: oklch(91% 0.11 78);
   background: oklch(82% 0.16 78 / 0.10);
+  font-family: var(--nh-font-display);
   font-size: 0.72rem;
-  font-weight: 900;
+  font-weight: 700;
   text-transform: uppercase;
 }
 
 .hero-copy h1 {
+  display: grid;
+  gap: 2px;
   margin: 0;
   max-width: 680px;
   color: var(--nh-text);
-  font-size: clamp(2.35rem, 5.7vw, 4.35rem);
-  line-height: 0.96;
+  font-family: var(--nh-font-display);
+  font-size: 4.12rem;
+  font-weight: 700;
+  line-height: 0.98;
   letter-spacing: 0;
+}
+
+.hero-copy h1 > span {
+  display: block;
+}
+
+.hero-quiet-wrap {
+  min-height: 1.04em;
+  color: oklch(91% 0.045 225);
+}
+
+.hero-quiet-word {
+  display: inline-block;
+  font-family: var(--nh-font-quiet);
+  font-size: 0.96em;
+  font-style: italic;
+  font-weight: 400;
+  line-height: 1;
+  text-shadow: 0 12px 34px oklch(83% 0.145 205 / 0.18);
+  animation: quiet-word-in 360ms ease-out;
 }
 
 .hero-copy p {
   max-width: 620px;
-  margin: 14px 0 0;
-  color: var(--nh-muted);
-  font-size: clamp(0.98rem, 2vw, 1.08rem);
-  line-height: 1.55;
+  margin: 18px 0 0;
+  color: oklch(86% 0.035 245);
+  font-size: 1.02rem;
+  font-weight: 500;
+  line-height: 1.62;
 }
 
 .hero-console {
@@ -769,7 +870,7 @@ const handleCancel = () => {
   min-height: 170px;
 }
 
-.radar-scope,
+.stealth-vault,
 .hero-metrics {
   border: 1px solid oklch(100% 0 0 / 0.18);
   border-radius: var(--nh-radius);
@@ -777,7 +878,7 @@ const handleCancel = () => {
   box-shadow: inset 0 1px 0 oklch(100% 0 0 / 0.13);
 }
 
-.radar-scope {
+.stealth-vault {
   position: relative;
   min-height: 170px;
   overflow: hidden;
@@ -788,43 +889,131 @@ const handleCancel = () => {
   background-size: 32px 32px;
 }
 
-.radar-ring {
+.stealth-vault::before {
+  content: "";
   position: absolute;
-  left: 50%;
-  top: 50%;
-  border: 1px solid oklch(83% 0.145 205 / 0.24);
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
+  inset: 16px;
+  border: 1px solid oklch(82% 0.16 78 / 0.24);
+  border-radius: calc(var(--nh-radius) - 2px);
+  background: linear-gradient(135deg, oklch(100% 0 0 / 0.06), transparent);
+  box-shadow: inset 0 0 40px oklch(5% 0.035 260 / 0.38);
 }
 
-.ring-one { width: 68px; height: 68px; }
-.ring-two { width: 116px; height: 116px; }
-.ring-three { width: 166px; height: 166px; }
+.vault-glow {
+  position: absolute;
+  left: 18%;
+  top: 16%;
+  width: 64%;
+  height: 68%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, oklch(82% 0.16 78 / 0.16), transparent 62%),
+    radial-gradient(circle at 70% 62%, oklch(83% 0.145 205 / 0.16), transparent 42%);
+  filter: blur(2px);
+}
 
-.radar-sweep {
+.vault-mask {
   position: absolute;
   left: 50%;
-  top: 50%;
+  top: 46%;
   width: 84px;
-  height: 2px;
-  background: linear-gradient(90deg, var(--nh-cyan), transparent);
-  box-shadow: 0 0 18px oklch(83% 0.145 205 / 0.44);
-  transform-origin: left center;
-  animation: radar-scan 3.6s linear infinite;
+  height: 60px;
+  border: 1px solid oklch(83% 0.145 205 / 0.34);
+  border-radius: 42px 42px 24px 24px;
+  background:
+    linear-gradient(145deg, oklch(20% 0.06 260 / 0.95), oklch(8% 0.04 255 / 0.92));
+  box-shadow: 0 18px 44px oklch(5% 0.035 260 / 0.45), inset 0 1px 0 oklch(100% 0 0 / 0.12);
+  transform: translate(-50%, -50%);
+  animation: mask-float 5.8s ease-in-out infinite;
 }
 
-.radar-point {
+.vault-mask::before,
+.vault-mask::after {
+  content: "";
   position: absolute;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--nh-lime);
-  box-shadow: 0 0 18px var(--nh-lime);
+  top: 24px;
+  width: 20px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--nh-cyan);
+  box-shadow: 0 0 14px oklch(83% 0.145 205 / 0.54);
+  animation: ninja-blink 5.4s ease-in-out infinite;
+  transform-origin: center;
 }
 
-.point-one { left: 66%; top: 28%; }
-.point-two { left: 34%; top: 61%; background: var(--nh-amber); box-shadow: 0 0 18px var(--nh-amber); }
-.point-three { left: 59%; top: 72%; background: var(--nh-cyan); box-shadow: 0 0 18px var(--nh-cyan); }
+.vault-mask::before { left: 19px; }
+.vault-mask::after { right: 19px; }
+
+.vault-mask span {
+  position: absolute;
+  left: 50%;
+  bottom: 11px;
+  width: 34px;
+  height: 2px;
+  border-radius: 999px;
+  background: oklch(100% 0 0 / 0.18);
+  transform: translateX(-50%);
+}
+
+.domain-token {
+  position: absolute;
+  z-index: 1;
+  display: inline-grid;
+  align-items: center;
+  justify-content: center;
+  place-items: center;
+  min-width: 50px;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid oklch(100% 0 0 / 0.16);
+  border-radius: 999px;
+  color: var(--nh-text);
+  background: oklch(13% 0.045 260 / 0.78);
+  box-shadow: 0 12px 30px oklch(5% 0.035 260 / 0.32);
+  font-size: 0.74rem;
+  font-weight: 700;
+  animation: token-gravitate 5.2s ease-in-out infinite;
+}
+
+.token-one {
+  left: 18px;
+  top: 26px;
+  color: oklch(91% 0.11 78);
+  border-color: oklch(82% 0.16 78 / 0.32);
+  animation-delay: -700ms;
+}
+
+.token-two {
+  right: 18px;
+  top: 48px;
+  color: oklch(90% 0.12 142);
+  border-color: oklch(82% 0.17 142 / 0.32);
+  animation-delay: -2s;
+}
+
+.token-three {
+  left: 28px;
+  bottom: 26px;
+  color: oklch(88% 0.11 205);
+  border-color: oklch(83% 0.145 205 / 0.32);
+  animation-delay: -3.2s;
+}
+
+.domain-token span {
+  grid-area: 1 / 1;
+  animation: token-pop 420ms ease-out;
+}
+
+.vault-line {
+  position: absolute;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, oklch(83% 0.145 205 / 0.42), transparent);
+  animation: vault-trace 3.4s ease-in-out infinite alternate;
+}
+
+.line-one { left: 24px; right: 34px; top: 74px; }
+.line-two { left: 42px; right: 28px; top: 100px; animation-delay: 500ms; }
+.line-three { left: 34px; right: 46px; top: 126px; animation-delay: 900ms; }
 
 .hero-metrics {
   display: grid;
@@ -845,13 +1034,15 @@ const handleCancel = () => {
 
 .hero-metrics span {
   color: oklch(82% 0.04 245 / 0.78);
+  font-family: var(--nh-font-display);
   font-size: 0.68rem;
-  font-weight: 900;
+  font-weight: 700;
   text-transform: uppercase;
 }
 
 .hero-metrics strong {
   color: var(--nh-text);
+  font-family: var(--nh-font-display);
   font-size: 1.2rem;
   line-height: 1;
 }
@@ -884,7 +1075,7 @@ const handleCancel = () => {
   background: oklch(11% 0.04 255 / 0.96);
   box-shadow: 0 16px 36px oklch(4% 0.035 260 / 0.42);
   font-size: 0.72rem;
-  font-weight: 800;
+  font-weight: 600;
   line-height: 1.35;
   opacity: 0;
   visibility: hidden;
@@ -909,7 +1100,7 @@ const handleCancel = () => {
   border-radius: var(--nh-radius);
   color: oklch(90% 0.10 78);
   background: oklch(82% 0.16 78 / 0.10);
-  font-weight: 700;
+  font-weight: 600;
   backdrop-filter: blur(14px);
 }
 
@@ -929,8 +1120,9 @@ const handleCancel = () => {
 .console-label {
   margin: 0 0 4px;
   color: var(--nh-cyan);
+  font-family: var(--nh-font-display);
   font-size: 0.72rem;
-  font-weight: 900;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0;
 }
@@ -939,6 +1131,7 @@ const handleCancel = () => {
 .results-header h2 {
   margin: 0;
   color: var(--nh-text);
+  font-family: var(--nh-font-display);
   font-size: 1.12rem;
   line-height: 1.2;
 }
@@ -952,7 +1145,7 @@ const handleCancel = () => {
   color: var(--nh-text);
   background: oklch(100% 0 0 / 0.08);
   font-size: 0.82rem;
-  font-weight: 900;
+  font-weight: 700;
 }
 
 .progress-track {
@@ -1000,7 +1193,7 @@ const handleCancel = () => {
 .current-domain small {
   color: oklch(82% 0.04 245 / 0.78);
   font-size: 0.78rem;
-  font-weight: 800;
+  font-weight: 600;
 }
 
 .current-domain strong {
@@ -1028,7 +1221,7 @@ const handleCancel = () => {
   color: var(--nh-muted);
   background: oklch(100% 0 0 / 0.07);
   font-size: 0.78rem;
-  font-weight: 900;
+  font-weight: 600;
 }
 
 .provider-dot {
@@ -1091,7 +1284,7 @@ const handleCancel = () => {
   border-radius: var(--nh-radius);
   color: var(--nh-text);
   background: oklch(100% 0 0 / 0.08);
-  font-weight: 900;
+  font-weight: 700;
 }
 
 .cancel-button:hover {
@@ -1129,7 +1322,7 @@ const handleCancel = () => {
 .filter-label {
   color: oklch(82% 0.04 245 / 0.84);
   font-size: 0.72rem;
-  font-weight: 900;
+  font-weight: 700;
   text-transform: uppercase;
 }
 
@@ -1138,7 +1331,7 @@ const handleCancel = () => {
   height: 38px;
   padding: 0 11px;
   font-size: 0.9rem;
-  font-weight: 800;
+  font-weight: 500;
 }
 
 .filter-set {
@@ -1160,7 +1353,7 @@ const handleCancel = () => {
   border-radius: var(--nh-radius);
   color: var(--nh-muted);
   background: oklch(100% 0 0 / 0.07);
-  font-weight: 900;
+  font-weight: 600;
   cursor: pointer;
   transition: border-color 160ms ease, background 160ms ease, color 160ms ease, opacity 160ms ease;
 }
@@ -1247,7 +1440,7 @@ const handleCancel = () => {
   margin: 0;
   color: var(--nh-muted);
   font-size: 0.86rem;
-  font-weight: 900;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0;
 }
@@ -1270,7 +1463,7 @@ const handleCancel = () => {
   min-height: 34px;
   border-radius: var(--nh-radius);
   font-size: 0.76rem;
-  font-weight: 900;
+  font-weight: 700;
 }
 
 .rdap-support-note {
@@ -1344,7 +1537,7 @@ const handleCancel = () => {
   max-width: 760px;
   color: oklch(84% 0.04 245 / 0.84);
   font-size: 0.82rem;
-  font-weight: 700;
+  font-weight: 500;
   line-height: 1.45;
 }
 
@@ -1373,14 +1566,52 @@ const handleCancel = () => {
   100% { opacity: 1; transform: translateY(-2px); }
 }
 
-@keyframes radar-scan {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+@keyframes vault-trace {
+  0% { opacity: 0.28; transform: translateX(-6px); }
+  100% { opacity: 0.86; transform: translateX(6px); }
+}
+
+@keyframes mask-float {
+  0%, 100% { transform: translate(-50%, -50%) translateY(0); }
+  50% { transform: translate(-50%, -50%) translateY(4px); }
+}
+
+@keyframes ninja-blink {
+  0%, 86%, 100% { transform: scaleY(1); opacity: 1; }
+  90%, 93% { transform: scaleY(0.2); opacity: 0.72; }
+}
+
+@keyframes token-gravitate {
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+  35% { transform: translate3d(5px, -7px, 0) rotate(2deg); }
+  70% { transform: translate3d(-4px, 5px, 0) rotate(-1deg); }
+}
+
+@keyframes token-pop {
+  0% { opacity: 0; transform: translateY(5px) scale(0.96); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes quiet-word-in {
+  0% { opacity: 0; transform: translateY(8px); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes dot-pulse {
   0% { opacity: 0.55; transform: scale(0.86); }
   100% { opacity: 1; transform: scale(1.12); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vault-mask,
+  .vault-mask::before,
+  .vault-mask::after,
+  .domain-token,
+  .domain-token span,
+  .vault-line,
+  .hero-quiet-word {
+    animation: none;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1403,12 +1634,20 @@ const handleCancel = () => {
     min-height: 0;
   }
 
-  .radar-scope {
+  .stealth-vault {
     min-height: 164px;
   }
 
   .hero-meta {
     margin-bottom: 14px;
+  }
+
+  .hero-copy h1 {
+    font-size: 2.9rem;
+  }
+
+  .hero-copy p {
+    font-size: 0.98rem;
   }
 
   .console-header,
